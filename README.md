@@ -1,6 +1,12 @@
-# fuseter
+**"Fuseter" = Fuse + Faster**
 
-Replacement for `Fuse.search` with `ignoreLocation: true`. Items, order and scores are identical to Fuse 7.5 (`npm test` compares them against Fuse 7.5.x on random corpora), 10-40x faster with the plain js tier and 100-300x with the simd tier. ESM only; `require()` works on Node 20.19+ and 22.12+.
+Fuseter is a replacement for [Fuse.js](https://github.com/krisk/fuse) that is significantly faster and comes with some heuristics for more improved scoring. Full parity is a WIP.
+
+Fuseter 10-40x faster with the plain js tier and 100-300x with the simd tier. 
+
+ESM only; `require()` works on Node 20.19+ and 22.12+.
+
+Usage:
 
 ```js
 import { Fuseter } from "fuseter";          // or "fuseter/js", "fuseter/wasm", "fuseter/simd"
@@ -11,11 +17,10 @@ ff.backend;                                    // the tier that is really runnin
 
 ## Backends
 
-Fuseter has three implementations of the same search. Faster ones need more from the runtime and add download size.
-
+Fuseter has three implementations of the same search. 
 ![Search time of Fuse and the three Fuseter tiers](https://raw.githubusercontent.com/Tamnac/fuseter/main/docs/benchmark.svg)
 
-The same measurements without Fuse, with a scale that makes the tiers comparable:
+The same measurements without Fuse, using a linear scale to better see differences between the three variants.
 
 ![Search time of the three Fuseter tiers](https://raw.githubusercontent.com/Tamnac/fuseter/main/docs/benchmark-tiers.svg)
 
@@ -28,37 +33,44 @@ The same measurements without Fuse, with a scale that makes the tiers comparable
 
 What to choose:
 
-- **Nothing**: `import { Fuseter } from "fuseter"` uses simd and falls back to a slower tier if the runtime cannot run it (no WebAssembly, blocked by a Content-Security-Policy, out of memory).
+- **Default**: `import { Fuseter } from "fuseter"` uses simd and falls back to the js build automatically if needed.(no WebAssembly, blocked by a Content-Security-Policy, out of memory).
 - **Smallest bundle**: import from `fuseter/js` or `fuseter/wasm`. `fuseter/js` contains no wasm at all, `fuseter/wasm` only the small scalar module.
 - **A specific tier**: `Fuseter.create(docs, options, { backend: "wasm" })`. `fallback` sets how far it may degrade: `"js"` (default), `"wasm"`, or `"throw"` to fail instead.
-- **To see what happened**: `ff.backend` is the tier that is running, `ff.fallbackReason` says why it degraded.
-- **Without await**: `Fuseter.createSync(docs, options)` returns a js instance immediately, because wasm compiles asynchronously.
+- **Without await**: `Fuseter.createSync(docs, options)` returns a js instance immediately. WASM compiles asynchronously.
 
-`setCollection(docs)` replaces the documents and rebuilds the index (about 0.1 s per 10K documents with 3 keys on simd).
+To see what you end up with, check `ff.backend` and `ff.fallbackReason`.
+
 
 ## Differences from Fuse
 
+**Will be fixed in later versions:**
 - `ignoreLocation` is always on (and is the default here). `location` and `distance` are accepted and ignored.
 - Not supported, rejected with a `TypeError`: `useExtendedSearch`, `useTokenSearch`, `includeMatches`, `findAllMatches`, `minMatchCharLength > 1`, `shouldSort: false`, `sortFn`, `getFn` (also per key), unknown options, non-string queries.
-- Supported: string collections, `keys` (names, dotted paths, path arrays, weights), array values (each element is a separate string like in Fuse, at most 64 strings per document), numbers and booleans as text, `threshold` (also per search), `limit`, `includeScore`, `isCaseSensitive`, `ignoreDiacritics`, `ignoreFieldNorm`, `fieldNormWeight`, blank queries (return every document, like Fuse), patterns longer than 32 characters (chunked like Fuse, slower: no in-wasm combine).
+
+**Supported:** 
+- string collections, `keys` (names, dotted paths, path arrays, weights), array values (each element is a separate string like in Fuse, at most 64 strings per document), numbers and booleans as text, `threshold` (also per search), `limit`, `includeScore`, `isCaseSensitive`, `ignoreDiacritics`, `ignoreFieldNorm`, `fieldNormWeight`, blank queries (return every document, like Fuse), patterns longer than 32 characters (chunked like Fuse, slower: no in-wasm combine).
+
+**Deliberate differences:**
 - `ignoreDiacritics` strips `\p{M}`, Fuse uses a fixed list of marks; 73 recently added code points differ.
 - Objects inside array values are ignored (Fuse indexes `"[object Object]"`).
 
 ## Typing heuristics (experimental)
 
-Opt-in options for search-as-you-type over short names and titles. They change the ranking, so results no longer match Fuse, and they may change in a minor release. Without `typing`, results are identical to Fuse.
+A couple of heuristics to better match how people type or make typos. 
+
+They change the ranking, so results no longer match Fuse, and are not stable yet. Without `typing`, results are identical to Fuse.
 
 ```js
 Fuseter.create(models, { keys: ["name"], typing: { firstLetter: true, transposition: true } });
 ```
 
-- `firstLetter`: the first letter of each query word counts double. A wrong or missing first letter costs 2 errors, and a first letter that matches the start of a word in the text is free. With `pt`, `x (pt)` scores 0.001 and `GPT` 0.333.
+- `firstLetter`: the first letter of each query word counts double. A wrong or missing first letter costs 2 errors. This is based on research that the first letter tends to rarely be wrong [Source 1](https://doi.org/10.1002/asi.4630340108), [Source 2](https://www.researchgate.net/publication/336536172_A_Probabilistic_Flexible_Abbreviation_Expansion_System_for_Users_With_Motor_Disabilities)
   - `{ weighted: "first" }` weights only the first letter of the whole query instead of every word.
   - `{ midWord: 2 }` makes a correct first letter in the middle of a word cost as much as a wrong one (default 1).
   - Words start after spaces and punctuation, and at camelCase humps (`myValue`). Queries over 32 characters ignore the option.
-- `transposition`: swapping two adjacent letters costs 1 error instead of 2, so `desspeek` still finds `deepseek`.
+- `transposition`: swapping two adjacent letters costs 1 error instead of 2.
 
-Cost on 10K books: `transposition` makes searches 20-25% slower, `firstLetter` roughly 2x slower (simd: 0.3 ms becomes 0.5 ms; see `scripts/bench-typing.mjs`). On the simd tier each option set loads an extra 9-12 KB (gzip) wasm module the first time it is used, so nothing is downloaded unless you enable them.
+Cost on 10K books: `transposition` makes searches 20-25% slower, `firstLetter` roughly 2x slower (simd: 0.3 ms becomes 0.5 ms; see `scripts/bench-typing.mjs`). On the simd tier each option set loads an extra 9-12 KB (gzip) wasm module the first time it is used.
 
 ## Development
 
