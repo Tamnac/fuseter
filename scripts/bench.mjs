@@ -1,5 +1,5 @@
-// Usage: node scripts/bench.mjs [books.json] [--fuse]   (default dataset: ../books_raw.json, --fuse also times Fuse.search)
-import { readFileSync } from "node:fs";
+// Usage: node scripts/bench.mjs [books.json] [--fuse] [--json=results.json]   (default dataset: ../books_raw.json, --fuse also times Fuse.search, --json saves the timings for scripts/chart.mjs)
+import { readFileSync, writeFileSync } from "node:fs";
 import Fuse from "fuse.js";
 import { Fuseter } from "../src/index.mjs";
 
@@ -16,6 +16,7 @@ function interleave(fns, rounds = 15, targetMs = 25) {
   return Object.fromEntries(names.map(n => [n, Math.min(...samples[n])]));
 }
 
+const jsonPath = args.find(a => a.startsWith("--json="))?.slice(7), results = [];
 const fmt = x => +x.toFixed(x < 10 ? 2 : 1);
 const built = {};
 for (const backend of ["simd", "wasm", "js"]) {
@@ -32,8 +33,10 @@ for (const threshold of [0.3, 0.6]) {
     const fns = Object.fromEntries(Object.entries(built).map(([name, ff]) => [name, () => ff.search(query, { threshold })]));
     if (withFuse) fns.fuse = () => fuses[threshold].search(query);
     const times = interleave(fns, withFuse ? 5 : 15);
+    results.push({ threshold, query, hits: built.simd.search(query, { threshold }).length, times });
     rows.push({ query, hits: built.simd.search(query, { threshold }).length, ...Object.fromEntries(Object.entries(times).map(([k, v]) => [k + " ms", fmt(v)])) });
   }
   console.log(`\nthreshold ${threshold}`);
   console.table(rows);
 }
+if (jsonPath) writeFileSync(jsonPath, JSON.stringify({ docs: books.length, results }, null, 2));
