@@ -1,0 +1,37 @@
+{
+  "name": "fastfuse",
+  "version": "0.1.0",
+  "description": "Rank-identical, much faster replacement for Fuse.search (ignoreLocation: true) with js, wasm and wasm-simd backends",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "default": "./src/index.mjs"
+    },
+    "./js": {
+      "types": "./src/index.d.ts",
+      "default": "./src/js.mjs"
+    },
+    "./wasm": {
+      "types": "./src/index.d.ts",
+      "default": "./src/wasm.mjs"
+    },
+    "./simd": {
+      "types": "./src/index.d.ts",
+      "default": "./src/simd.mjs"
+    }
+  },
+  "files": [
+    "src"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build:wasm": "node scripts/build-wasm.mjs",
+    "test": "node --test test/",
+    "demo": "node demo/server.mjs"
+  },
+  "devDependencies": {
+    "fuse.js": "^7.5.0"
+  },
+  "types": "./src/index.d.ts"
+}
