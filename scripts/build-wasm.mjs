@@ -1,6 +1,6 @@
 // Builds the wasm kernels with zig and embeds them as base64 modules (src/wasm/*.mjs). The generated files are committed, zig is only needed to rebuild.
 import { execFileSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { gzipSync } from "node:zlib";
 import { fileURLToPath } from "node:url";
 
@@ -12,6 +12,8 @@ const targets = [
   { name: "simd-weighted", source: "zig/simd7w.zig", flags: ["-mcpu=generic+simd128"] },   // loaded on demand, only for typing.firstLetter
   { name: "simd-weighted-transposition", source: "zig/simd7wd.zig", flags: ["-mcpu=generic+simd128"] },
 ];
+
+mkdirSync(root + "wasm", { recursive: true });   // wasm/ is not committed
 
 for (const { name, source, flags } of targets) {
   const bin = `wasm/${name}.wasm`;
