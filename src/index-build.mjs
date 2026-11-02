@@ -5,9 +5,9 @@ const MAX_SLOTS = 64;
 
 function parseKey(key) {
   const spec = typeof key === "string" || Array.isArray(key) ? { name: key } : key;
-  if (spec === null || typeof spec !== "object" || spec.getFn) throw new TypeError("fastfuse: unsupported key definition (getFn is not supported)");
+  if (spec === null || typeof spec !== "object" || spec.getFn) throw new TypeError("fuseter: unsupported key definition (getFn is not supported)");
   const { name, weight = 1 } = spec;
-  if (!(weight > 0)) throw new RangeError(`fastfuse: key weight for '${name}' must be greater than 0`);
+  if (!(weight > 0)) throw new RangeError(`fuseter: key weight for '${name}' must be greater than 0`);
   return { path: Array.isArray(name) ? name : String(name).split("."), weight };
 }
 
@@ -40,7 +40,7 @@ function extract(doc, path) {
 // slots are laid out key-major so per-document scores multiply in the same order as in Fuse.
 // Typing heuristics: `starts` adds a word-start flag per corpus character.
 export function buildIndex(docs, { keys = [], fieldNormWeight = 1, isCaseSensitive = false, ignoreDiacritics = false, starts = false } = {}) {
-  if (!Array.isArray(docs)) throw new TypeError("fastfuse: the collection must be an array");
+  if (!Array.isArray(docs)) throw new TypeError("fuseter: the collection must be an array");
   const nDocs = docs.length, keyless = typeof docs[0] === "string";
   const defs = keyless ? [{ path: [], weight: 1 }] : keys.map(parseKey);
   const nk = defs.length;
@@ -56,7 +56,7 @@ export function buildIndex(docs, { keys = [], fieldNormWeight = 1, isCaseSensiti
   }
   const base = new Array(nk); let K = 0;
   for (let k = 0; k < nk; k++) { base[k] = K; K += width[k]; }
-  if (K > MAX_SLOTS) throw new RangeError(`fastfuse: documents expand to ${K} string slots per document (max ${MAX_SLOTS}); array values are too long`);
+  if (K > MAX_SLOTS) throw new RangeError(`fuseter: documents expand to ${K} string slots per document (max ${MAX_SLOTS}); array values are too long`);
 
   const weights = new Float64Array(K);
   for (let k = 0; k < nk; k++) weights.fill(defs[k].weight / totalWeight, base[k], base[k] + width[k]);

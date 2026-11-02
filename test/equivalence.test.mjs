@@ -1,7 +1,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
-import { FastFuse } from "../src/index.mjs";
+import { Fuseter } from "../src/index.mjs";
 import { rng, randomDocs, randomQueries, stringsOf, compare, fuseFor, randomText } from "./helpers.mjs";
 
 const BACKENDS = ["simd", "wasm", "js"];
@@ -11,7 +11,7 @@ const THRESHOLDS = [0, 0.1, 0.25, 0.4, 0.6, 0.8, 1];
 async function check(docs, options, queries, { thresholds = THRESHOLDS, limits = [undefined, 3] } = {}) {
   const instances = [];
   for (const backend of BACKENDS) {
-    const ff = await FastFuse.create(docs, { ...options, includeScore: true }, { backend, fallback: "throw" });
+    const ff = await Fuseter.create(docs, { ...options, includeScore: true }, { backend, fallback: "throw" });
     assert.equal(ff.backend, backend);
     instances.push(ff);
   }
@@ -95,25 +95,25 @@ describe("matches Fuse (ignoreLocation: true)", () => {
 describe("limit and query handling", () => {
   test("limit follows Fuse", async () => {
     const docs = randomDocs(rng(21), 100), fuse = fuseFor(docs, { keys: ["title"] });
-    const ff = await FastFuse.create(docs, { keys: ["title"], includeScore: true });
+    const ff = await Fuseter.create(docs, { keys: ["title"], includeScore: true });
     for (const limit of [0, 1, 2.7, 1000, -1, Infinity, undefined]) {
       assert.equal(compare(ff.search("a", { limit }), fuse.search("a", { limit })), null, `limit ${limit}`);
     }
   });
 
   test("blank query returns every document, like Fuse", async () => {
-    const docs = [{ a: "abc" }, { a: "xyz" }, {}], ff = await FastFuse.create(docs, { keys: ["a"], includeScore: true });
+    const docs = [{ a: "abc" }, { a: "xyz" }, {}], ff = await Fuseter.create(docs, { keys: ["a"], includeScore: true });
     assert.deepEqual(ff.search(" "), [{ item: docs[0], refIndex: 0 }, { item: docs[1], refIndex: 1 }, { item: docs[2], refIndex: 2 }]);
     assert.deepEqual(ff.search("", { limit: 1 }), [{ item: docs[0], refIndex: 0 }]);
   });
 
   test("non-string queries are rejected", async () => {
-    const ff = await FastFuse.create([{ a: "abc" }], { keys: ["a"] });
+    const ff = await Fuseter.create([{ a: "abc" }], { keys: ["a"] });
     assert.throws(() => ff.search({ a: "abc" }), TypeError);
   });
 
   test("score is omitted unless includeScore", async () => {
-    const ff = await FastFuse.create([{ a: "abc" }], { keys: ["a"] });
+    const ff = await Fuseter.create([{ a: "abc" }], { keys: ["a"] });
     assert.deepEqual(Object.keys(ff.search("abc")[0]).sort(), ["item", "refIndex"]);
   });
 });

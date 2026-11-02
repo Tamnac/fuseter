@@ -1,7 +1,26 @@
 {
-  "name": "fastfuse",
-  "version": "0.1.0",
+  "name": "fuseter",
+  "version": "0.2.0",
+  "license": "MIT",
   "description": "Rank-identical, much faster replacement for Fuse.search (ignoreLocation: true) with js, wasm and wasm-simd backends",
+  "keywords": [
+    "fuzzy",
+    "search",
+    "fuse",
+    "fuse.js",
+    "bitap",
+    "wasm",
+    "simd",
+    "webassembly"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Tamnac/fuseter.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Tamnac/fuseter/issues"
+  },
+  "homepage": "https://github.com/Tamnac/fuseter#readme",
   "type": "module",
   "exports": {
     ".": {
@@ -21,17 +40,19 @@
       "default": "./src/simd.mjs"
     }
   },
+  "types": "./src/index.d.ts",
   "files": [
     "src"
   ],
   "sideEffects": false,
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "build:wasm": "node scripts/build-wasm.mjs",
-    "test": "node --test test/",
-    "demo": "node demo/server.mjs"
+    "test": "node --test"
   },
   "devDependencies": {
     "fuse.js": "^7.5.0"
-  },
-  "types": "./src/index.d.ts"
+  }
 }

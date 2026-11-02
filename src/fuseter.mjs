@@ -21,22 +21,22 @@ const UNSUPPORTED = {
 function resolveOptions(options) {
   for (const name of Object.keys(options)) {
     if (name in OPTION_DEFAULTS || IGNORED_OPTIONS.includes(name)) continue;
-    if (!(name in UNSUPPORTED)) throw new TypeError(`fastfuse: unknown option '${name}'`);
-    if (options[name] !== UNSUPPORTED[name]) throw new TypeError(`fastfuse: option '${name}' is not supported (only ${JSON.stringify(UNSUPPORTED[name])})`);
+    if (!(name in UNSUPPORTED)) throw new TypeError(`fuseter: unknown option '${name}'`);
+    if (options[name] !== UNSUPPORTED[name]) throw new TypeError(`fuseter: option '${name}' is not supported (only ${JSON.stringify(UNSUPPORTED[name])})`);
   }
   return { ...OPTION_DEFAULTS, ...options };
 }
 
-// Builds the FastFuse class for the given set of backends ({ simd?, wasm?, js }); each package entry point passes only what it ships.
-export function defineFastFuse(backends, defaultBackend) {
+// Builds the Fuseter class for the given set of backends ({ simd?, wasm?, js }); each package entry point passes only what it ships.
+export function defineFuseter(backends, defaultBackend) {
   function plan(backend, fallback) {
-    if (!(backend in backends)) throw new TypeError(`fastfuse: backend '${backend}' is not available in this entry point (has: ${Object.keys(backends).join(", ")})`);
-    if (!FALLBACKS.includes(fallback)) throw new TypeError(`fastfuse: fallback must be one of ${FALLBACKS.join(", ")}`);
+    if (!(backend in backends)) throw new TypeError(`fuseter: backend '${backend}' is not available in this entry point (has: ${Object.keys(backends).join(", ")})`);
+    if (!FALLBACKS.includes(fallback)) throw new TypeError(`fuseter: fallback must be one of ${FALLBACKS.join(", ")}`);
     const floor = fallback === "throw" ? backend : fallback;
     return TIERS.slice(TIERS.indexOf(backend), TIERS.indexOf(floor) + 1).filter(t => t in backends);
   }
 
-  return class FastFuse {
+  return class Fuseter {
     // Rank-equivalent drop-in for `new Fuse(docs, { ...options, ignoreLocation: true }).search(query, { limit })`.
     // runtime: { backend: 'simd' | 'wasm' | 'js', fallback: 'js' (default) | 'wasm' | 'throw' }
     static async create(docs, options = {}, { backend = defaultBackend, fallback = "js" } = {}) {
@@ -45,12 +45,12 @@ export function defineFastFuse(backends, defaultBackend) {
       for (const tier of candidates) {
         try { await backends[tier].load({ transposition, weighted: Boolean(firstLetter) }); } catch (e) { failures.push([tier, e]); }
       }
-      return new FastFuse(docs, options, { backend, candidates, failures });
+      return new Fuseter(docs, options, { backend, candidates, failures });
     }
 
     // Synchronous construction on the js backend (wasm needs async compilation).
     static createSync(docs, options = {}) {
-      return new FastFuse(docs, options, { backend: "js", candidates: ["js"], failures: [] });
+      return new Fuseter(docs, options, { backend: "js", candidates: ["js"], failures: [] });
     }
 
     constructor(docs, options, { backend, candidates, failures }) {
@@ -81,7 +81,7 @@ export function defineFastFuse(backends, defaultBackend) {
         } catch (e) { failures.push([tier, e]); }
       }
       const [tier, cause] = failures[0];
-      throw new Error(`fastfuse: backend '${tier}' failed and no fallback is allowed: ${cause.message}`, { cause });
+      throw new Error(`fuseter: backend '${tier}' failed and no fallback is allowed: ${cause.message}`, { cause });
     }
 
     // Returns [{ item, refIndex, score? }] ordered like Fuse; `threshold` here overrides the constructor option for this call.

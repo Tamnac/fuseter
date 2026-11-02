@@ -13,19 +13,19 @@ const FIRST_LETTER_KNOWN = ["weighted", "midWord"];
 // Queries longer than 32 characters are scored chunk by chunk without it.
 export function resolveTyping(typing) {
   if (typing == null) return { firstLetter: null, transposition: false };
-  if (typeof typing !== "object") throw new TypeError("fastfuse: 'typing' must be an object");
-  for (const name of Object.keys(typing)) if (!KNOWN.includes(name)) throw new TypeError(`fastfuse: unknown typing heuristic '${name}'`);
+  if (typeof typing !== "object") throw new TypeError("fuseter: 'typing' must be an object");
+  for (const name of Object.keys(typing)) if (!KNOWN.includes(name)) throw new TypeError(`fuseter: unknown typing heuristic '${name}'`);
   return { firstLetter: resolveFirstLetter(typing.firstLetter), transposition: Boolean(typing.transposition) };
 }
 
 function resolveFirstLetter(option) {
   if (!option) return null;
   if (option === true) option = {};
-  if (typeof option !== "object") throw new TypeError("fastfuse: typing.firstLetter must be true or an object");
-  for (const name of Object.keys(option)) if (!FIRST_LETTER_KNOWN.includes(name)) throw new TypeError(`fastfuse: unknown typing.firstLetter option '${name}'`);
+  if (typeof option !== "object") throw new TypeError("fuseter: typing.firstLetter must be true or an object");
+  for (const name of Object.keys(option)) if (!FIRST_LETTER_KNOWN.includes(name)) throw new TypeError(`fuseter: unknown typing.firstLetter option '${name}'`);
   const { weighted = true, midWord = 1 } = option;
-  if (weighted !== true && weighted !== "first") throw new TypeError("fastfuse: typing.firstLetter.weighted must be true or 'first'");
-  if (midWord !== 1 && midWord !== 2) throw new RangeError("fastfuse: typing.firstLetter.midWord must be 1 or 2");
+  if (weighted !== true && weighted !== "first") throw new TypeError("fuseter: typing.firstLetter.weighted must be true or 'first'");
+  if (midWord !== 1 && midWord !== 2) throw new RangeError("fuseter: typing.firstLetter.midWord must be 1 or 2");
   return { weighted, midWord };
 }
 

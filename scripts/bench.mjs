@@ -1,7 +1,7 @@
 // Usage: node scripts/bench.mjs [books.json] [--fuse]   (default dataset: ../books_raw.json, --fuse also times Fuse.search)
 import { readFileSync } from "node:fs";
 import Fuse from "fuse.js";
-import { FastFuse } from "../src/index.mjs";
+import { Fuseter } from "../src/index.mjs";
 
 const args = process.argv.slice(2), withFuse = args.includes("--fuse");
 const file = args.find(a => !a.startsWith("--")) ?? new URL("../../books_raw.json", import.meta.url);
@@ -20,7 +20,7 @@ const fmt = x => +x.toFixed(x < 10 ? 2 : 1);
 const built = {};
 for (const backend of ["simd", "wasm", "js"]) {
   const t = performance.now();
-  built[backend] = await FastFuse.create(books, { keys }, { backend, fallback: "throw" });
+  built[backend] = await Fuseter.create(books, { keys }, { backend, fallback: "throw" });
   console.log(`${backend}: create ${fmt(performance.now() - t)} ms for ${books.length} docs`);
 }
 const fuses = {};

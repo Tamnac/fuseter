@@ -1,6 +1,6 @@
 // Usage: [TIERS=simd,wasm,js] [VARIANTS=standard,both,...] node scripts/bench-typing.mjs [books.json]   Search time of the typing heuristics against the standard kernels, per backend.
 import { readFileSync } from "node:fs";
-import { FastFuse } from "../src/index.mjs";
+import { Fuseter } from "../src/index.mjs";
 
 const file = process.argv[2] ?? new URL("../../books_raw.json", import.meta.url);
 const books = JSON.parse(readFileSync(file, "utf8"));
@@ -27,7 +27,7 @@ for (const backend of (process.env.TIERS ?? "simd,wasm,js").split(",")) {
   const built = {};
   for (const [name, typing] of Object.entries(variants)) {
     if (process.env.VARIANTS && !process.env.VARIANTS.split(",").includes(name)) continue;
-    built[name] = await FastFuse.create(books, { keys, typing }, { backend, fallback: "throw" });
+    built[name] = await Fuseter.create(books, { keys, typing }, { backend, fallback: "throw" });
   }
   for (const threshold of [0.3, 0.6]) {
     const rows = [];

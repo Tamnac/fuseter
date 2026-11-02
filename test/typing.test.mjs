@@ -1,6 +1,6 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { FastFuse } from "../src/index.mjs";
+import { Fuseter } from "../src/index.mjs";
 import { kmaxFor } from "../src/kernel-js.mjs";
 import { fieldNorm, textNormalizer } from "../src/text.mjs";
 import { rng, randomText, randomQueries, stringsOf, compare, fuseFor, edit } from "./helpers.mjs";
@@ -94,7 +94,7 @@ const check = async (docs, keys, queries, typing, backends = BACKENDS) => {
   const { firstLetter, transposition } = typing;
   const weighted = !firstLetter ? false : firstLetter === true ? true : firstLetter.weighted ?? true, midWord = firstLetter?.midWord ?? 1;
   for (const backend of backends) {
-    const ff = await FastFuse.create(docs, options, { backend, fallback: "throw" });
+    const ff = await Fuseter.create(docs, options, { backend, fallback: "throw" });
     for (const threshold of THRESHOLDS) for (const query of queries) for (const limit of [undefined, 4]) {
       const want = reference(docs, keys, query, { threshold, weighted, midWord, transposition, limit });
       const got = ff.search(query, { threshold, limit }).map(r => ({ refIndex: r.refIndex, score: r.score }));
@@ -149,8 +149,8 @@ describe("transposition", () => {
 
   test("a swapped pair costs one error", async () => {
     const names = ["deepseek", "deepseek v3", "other"];
-    const plain = await FastFuse.create(names, { includeScore: true, ignoreFieldNorm: true });
-    const swapped = await FastFuse.create(names, { includeScore: true, ignoreFieldNorm: true, typing: { transposition: true } });
+    const plain = await Fuseter.create(names, { includeScore: true, ignoreFieldNorm: true });
+    const swapped = await Fuseter.create(names, { includeScore: true, ignoreFieldNorm: true, typing: { transposition: true } });
     assert.equal(plain.search("depeseek")[0].score, 2 / 8);
     assert.equal(swapped.search("depeseek")[0].score, 1 / 8);
     assert.equal(swapped.search("dpeeseek")[0].score, 2 / 8);
@@ -158,7 +158,7 @@ describe("transposition", () => {
 
   test("identical to Fuse when disabled", async () => {
     const options = { keys, includeScore: true };
-    const ff = await FastFuse.create(docs, { ...options, typing: { transposition: false } });
+    const ff = await Fuseter.create(docs, { ...options, typing: { transposition: false } });
     for (const query of queries.slice(0, 15)) assert.equal(compare(ff.search(query), fuseFor(docs, options).search(query)), null, query);
   });
 });
@@ -187,7 +187,7 @@ describe("weighted first letter only", () => {
     const strict = { firstLetter: { weighted: "first", midWord: 2 } };
     await check(docs, keys, queries, strict);
     const names = ["Perceptron", "GPT", "x (pt)", "tp link"];
-    const ff = await FastFuse.create(names, { includeScore: true, ignoreFieldNorm: true, threshold: 0.7, typing: strict }, { backend: "js" });
+    const ff = await Fuseter.create(names, { includeScore: true, ignoreFieldNorm: true, threshold: 0.7, typing: strict }, { backend: "js" });
     const hits = q => ff.search(q).map(x => [x.refIndex, +x.score.toFixed(3)]);
     assert.deepEqual(hits("pt"), [[2, 0.001], [0, 0.333]]);   // GPT would cost 2, more than a 2-character pattern may have
     assert.deepEqual(hits("gpt"), [[1, 0], [0, 0.5], [2, 0.5]]);   // dropping the g costs 2 errors / (3 + 1)
@@ -199,10 +199,10 @@ describe("weighted first letter only", () => {
     await check(docs, keys, queries, cheap);
     await check(docs, keys, swappedQueries(rng(45), stringsOf(docs, ["title", "author"]), 40), { ...cheap, transposition: true });
     const names = ["Prompt tuned", "x (pt)", "GPT", "Perceptron", "tp link"];
-    const ff = await FastFuse.create(names, { includeScore: true, ignoreFieldNorm: true, threshold: 0.7, typing: cheap }, { backend: "js" });
+    const ff = await Fuseter.create(names, { includeScore: true, ignoreFieldNorm: true, threshold: 0.7, typing: cheap }, { backend: "js" });
     const hits = q => ff.search(q).map(x => [x.refIndex, +x.score.toFixed(3)]);
     assert.deepEqual(hits("pt"), [[1, 0.001], [0, 0.333], [2, 0.333], [3, 0.333]]);   // GPT now stays in: mid-word p costs 1, not 2
-    await assert.rejects(FastFuse.create(names, { typing: { firstLetter: { weighted: "first", midWord: 3 } } }), /midWord/);
+    await assert.rejects(Fuseter.create(names, { typing: { firstLetter: { weighted: "first", midWord: 3 } } }), /midWord/);
   });
 
   });
@@ -231,7 +231,7 @@ describe("weighted first letter of every word (the default)", () => {
 
   test("every query word counts: a wrong letter at the start of a later word costs 2", async () => {
     const names = ["Cohere: Command A+", "Wen Coffee", "Open Command"];
-    const make = async weighted => FastFuse.create(names, { includeScore: true, ignoreFieldNorm: true, threshold: 0.6, typing: { firstLetter: { weighted } } }, { backend: "js" });
+    const make = async weighted => Fuseter.create(names, { includeScore: true, ignoreFieldNorm: true, threshold: 0.6, typing: { firstLetter: { weighted } } }, { backend: "js" });
     const hits = (ff, q) => ff.search(q).map(x => [x.refIndex, +x.score.toFixed(5)]);
     const first = await make("first"), every = await make(true);
     assert.deepEqual(hits(first, "wen co"), [[1, 0.001], [2, 0.28571], [0, 0.42857]]);   // w dropped: 2, plus n for : (1) in Cohere, over 6 + 1
@@ -249,8 +249,8 @@ describe("first letter option", () => {
 
   test("true means every query word counts", async () => {
     await check(docs, keys, queries, { firstLetter: true });
-    const a = await FastFuse.create(docs, { keys, includeScore: true, typing: { firstLetter: true } });
-    const b = await FastFuse.create(docs, { keys, includeScore: true, typing: { firstLetter: { weighted: true } } });
+    const a = await Fuseter.create(docs, { keys, includeScore: true, typing: { firstLetter: true } });
+    const b = await Fuseter.create(docs, { keys, includeScore: true, typing: { firstLetter: { weighted: true } } });
     for (const query of queries.slice(0, 15)) assert.equal(compare(a.search(query), b.search(query)), null, query);
   });
 
@@ -265,9 +265,9 @@ describe("first letter option", () => {
   test("patterns longer than 32 characters are scored in chunks on every backend", async () => {
     const strings = Array.from({ length: 120 }, () => randomText(r, 6, 12));
     const query = strings.find(s => s.length > 40).slice(0, 40).replace(/ $/, "x");
-    const off = await FastFuse.create(strings, { includeScore: true }, { backend: "js" });
+    const off = await Fuseter.create(strings, { includeScore: true }, { backend: "js" });
     for (const backend of ["simd", "wasm", "js"]) {
-      const on = await FastFuse.create(strings, { includeScore: true, typing: { firstLetter: true } }, { backend, fallback: "throw" });
+      const on = await Fuseter.create(strings, { includeScore: true, typing: { firstLetter: true } }, { backend, fallback: "throw" });
       assert.equal(compare(on.search(query), off.search(query)), null, backend);
     }
   });
@@ -276,7 +276,7 @@ describe("first letter option", () => {
     const names = ["OpenAI: GPT-6.1 Terra Pro (batch)", "GPT4Terra", "ultraptable", "x (pt)", "Prompt tuned", "myPtValue"];
     const options = { includeScore: true, ignoreFieldNorm: true, threshold: 0.4 };
     for (const backend of ["simd", "wasm", "js"]) {
-      const ff = await FastFuse.create(names, { ...options, typing: { firstLetter: true } }, { backend, fallback: "throw" });
+      const ff = await Fuseter.create(names, { ...options, typing: { firstLetter: true } }, { backend, fallback: "throw" });
       const hits = q => ff.search(q).map(x => [x.refIndex, +x.score.toFixed(3)]);
       assert.deepEqual(hits("pt"), [[3, 0.001], [5, 0.001], [0, 0.333], [1, 0.333], [2, 0.333], [4, 0.333]], backend);
       assert.deepEqual(hits("terra"), [[0, 0.001], [1, 0.167]], backend);
@@ -286,15 +286,15 @@ describe("first letter option", () => {
   test("off or disabled is identical to Fuse", async () => {
     const options = { keys, includeScore: true };
     for (const typing of [undefined, null, {}, { firstLetter: false }]) {
-      const ff = await FastFuse.create(docs, { ...options, typing });
+      const ff = await Fuseter.create(docs, { ...options, typing });
       for (const query of ["lord", "ptter", "-x"]) assert.equal(compare(ff.search(query), fuseFor(docs, options).search(query)), null, query);
     }
   });
 
   test("weighting only the first character leaves a query that starts with something else unweighted", async () => {
-    const off = await FastFuse.create(docs, { keys, includeScore: true });
+    const off = await Fuseter.create(docs, { keys, includeScore: true });
     for (const backend of ["simd", "wasm", "js"]) {
-      const on = await FastFuse.create(docs, { keys, includeScore: true, typing: { firstLetter: { weighted: "first" } } }, { backend, fallback: "throw" });
+      const on = await Fuseter.create(docs, { keys, includeScore: true, typing: { firstLetter: { weighted: "first" } } }, { backend, fallback: "throw" });
       for (const query of ["-x", "(a", "  x"]) assert.equal(compare(on.search(query), off.search(query)), null, `${backend} ${query}`);
     }
   });
@@ -302,6 +302,6 @@ describe("first letter option", () => {
   test("invalid typing options are rejected", async () => {
     const bad = [{ nope: true }, "yes", { firstLetter: { penalty: 0.2 } }, { firstLetter: "yes" }, { firstLetter: { weighted: "words" } }, { firstLetter: { weighted: 1 } },
       { firstLetter: { weighted: false } }, { firstLetter: { midWord: 0 } }, { firstLetter: { midWord: 3 } }];
-    for (const typing of bad) await assert.rejects(FastFuse.create(docs, { keys, typing }), /typing|penalty|weighted|midWord/, JSON.stringify(typing));
+    for (const typing of bad) await assert.rejects(Fuseter.create(docs, { keys, typing }), /typing|penalty|weighted|midWord/, JSON.stringify(typing));
   });
 });

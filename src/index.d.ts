@@ -2,7 +2,7 @@ export type Backend = "simd" | "wasm" | "js";
 
 export type KeyDefinition = string | string[] | { name: string | string[]; weight?: number };
 
-export interface FastFuseOptions {
+export interface FuseterOptions {
   keys?: KeyDefinition[];
   /** Default 0.6. Can be overridden per search. */
   threshold?: number;
@@ -11,7 +11,7 @@ export interface FastFuseOptions {
   ignoreDiacritics?: boolean;
   ignoreFieldNorm?: boolean;
   fieldNormWeight?: number;
-  /** Opt-in typing heuristics. They change the ranking, so results no longer match Fuse. */
+  /** Experimental, opt-in typing heuristics. They change the ranking, so results no longer match Fuse, and they may change in a minor release. */
   typing?: TypingOptions;
   /** Only `true` is supported (this is the default here, unlike Fuse). */
   ignoreLocation?: true;
@@ -26,7 +26,7 @@ export interface TypingOptions {
    * and the score is errors / (query length + number of words). `weighted: "first"` weights only the first character of the query
    * (the score divides by query length + 1). Queries over 32 characters ignore it.
    * `midWord` (default 1) is the cost of an exact weighted character that is not on a word start; 2 prices it like a wrong one.
-   * The simd tier loads a different wasm module (about 10.5 KB gzipped, 13 KB with `transposition`) the first time this is used.
+   * The simd tier loads a different wasm module (about 9.4 KB gzipped, 11.6 KB with `transposition`) the first time this is used.
    */
   firstLetter?: boolean | { weighted?: true | "first"; midWord?: 1 | 2 };
   /**
@@ -48,16 +48,16 @@ export interface SearchOptions {
   threshold?: number;
 }
 
-export interface FastFuseResult<T> {
+export interface FuseterResult<T> {
   item: T;
   refIndex: number;
   score?: number;
 }
 
-export class FastFuse<T = unknown> {
-  static create<T>(docs: readonly T[], options?: FastFuseOptions, runtime?: RuntimeOptions): Promise<FastFuse<T>>;
+export class Fuseter<T = unknown> {
+  static create<T>(docs: readonly T[], options?: FuseterOptions, runtime?: RuntimeOptions): Promise<Fuseter<T>>;
   /** js backend only. */
-  static createSync<T>(docs: readonly T[], options?: FastFuseOptions): FastFuse<T>;
+  static createSync<T>(docs: readonly T[], options?: FuseterOptions): Fuseter<T>;
   /** The backend that is actually running. */
   readonly backend: Backend;
   readonly requestedBackend: Backend;
@@ -66,8 +66,8 @@ export class FastFuse<T = unknown> {
   readonly size: number;
   /** Stage timings (ms) of the most recent search. */
   readonly timings: { scan: number; combine: number; format: number };
-  search(query: string, options?: SearchOptions): FastFuseResult<T>[];
+  search(query: string, options?: SearchOptions): FuseterResult<T>[];
   setCollection(docs: readonly T[]): this;
 }
 
-export default FastFuse;
+export default Fuseter;

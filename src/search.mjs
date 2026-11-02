@@ -82,7 +82,7 @@ export function createSearcher(index, scanner, { threshold: defaultThreshold, ig
     : d => ({ item: docs[d], refIndex: d });
 
   function search(query, { limit, threshold = defaultThreshold } = {}) {
-    if (typeof query !== "string") throw new TypeError("fastfuse: the query must be a string");
+    if (typeof query !== "string") throw new TypeError("fuseter: the query must be a string");
     if (!query.trim()) {
       const all = docs.map((item, refIndex) => ({ item, refIndex }));
       return typeof limit === "number" && limit > -1 ? all.slice(0, limit) : all;

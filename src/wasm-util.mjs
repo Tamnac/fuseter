@@ -16,7 +16,7 @@ export function lazyModule(source) {
       return pending;
     },
     instantiate() {
-      if (!module) throw new Error("fastfuse: wasm module is not loaded yet");
+      if (!module) throw new Error("fuseter: wasm module is not loaded yet");
       return new WebAssembly.Instance(module, {});
     },
   };
