@@ -13,7 +13,11 @@ ff.backend;                                    // the tier that is really runnin
 
 Fuseter has three implementations of the same search. Faster ones need more from the runtime and add download size.
 
-![Search time per query for Fuse and the three Fuseter tiers on 9,870 books](https://raw.githubusercontent.com/Tamnac/fuseter/main/docs/benchmark.svg)
+![Search time of Fuse and the three Fuseter tiers](https://raw.githubusercontent.com/Tamnac/fuseter/main/docs/benchmark.svg)
+
+The same measurements without Fuse, with a scale that makes the tiers comparable:
+
+![Search time of the three Fuseter tiers](https://raw.githubusercontent.com/Tamnac/fuseter/main/docs/benchmark-tiers.svg)
 
 | tier | needs | download (gzip) | search, 10K docs, threshold 0.3 |
 |---|---|---|---|
@@ -61,4 +65,4 @@ Cost on 10K books: `transposition` makes searches 20-25% slower, `firstLetter` r
 - `npm install`, then `npm test`: runs the equivalence suite (random corpora, all tiers, thresholds 0-1, limits, every supported option, forced fallbacks) against the Fuse 7.5 dev dependency. Takes about a minute.
 - `npm run build:wasm` rebuilds `wasm/*.wasm` and the embedded `src/wasm/*.mjs` from `zig/` (needs zig 0.17; the generated `src/wasm/*.mjs` are committed and CI fails if a rebuild changes them).
 - `node scripts/browser-check.mjs [chromium] [firefox] [webkit]` bundles the library with esbuild (code splitting) and runs the Fuse comparison, the typing options and the fallback logic in real browsers, once normally and once under a CSP that blocks wasm. Setup: `npm i --no-save playwright esbuild && npx playwright install chromium firefox`. Last run: Chromium 156 and Firefox 157 pass; Safari is untested.
-- `node scripts/bench.mjs [books.json] [--fuse] [--json=file]` prints a timing table (`--json` saves it, `node scripts/chart.mjs` turns it into `docs/benchmark.svg`); `node scripts/bench-typing.mjs [books.json]` compares the typing heuristics with the standard kernels.
+- `node scripts/bench.mjs [books.json] [--fuse] [--json=file]` prints a timing table (`--json` saves it, `node scripts/chart.mjs` turns it into the charts in `docs/`); `node scripts/bench-typing.mjs [books.json]` compares the typing heuristics with the standard kernels.
