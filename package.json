@@ -1,6 +1,6 @@
 {
   "name": "fuseter",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "license": "MIT",
   "description": "Rank-identical, much faster replacement for Fuse.search (ignoreLocation: true) with js, wasm and wasm-simd backends",
   "keywords": [
