@@ -3,7 +3,6 @@ import { lazyModule, allocate, wasmSupported } from "./wasm-util.mjs";
 import scalarBase64 from "./wasm/scalar.mjs";
 
 const module = lazyModule(async () => scalarBase64);
-const UNWEIGHTED = { mask: 0, midWord: 1 };
 
 export const wasmBackend = {
   name: "wasm",
@@ -22,12 +21,10 @@ export const wasmBackend = {
     return {
       out,
       prep(pattern) { fillCharTable(table, pattern, previous); },
-      // With word-start flags every scan is weighted; a missing rule (no weighted position, chunked pattern) weights nothing.
+      // A missing rule (no weighted position, chunked pattern) takes the plain kernel.
       scan(patLen, kmax, rule = null) {
-        if (starts) {
-          const { mask, midWord, denom = patLen } = rule ?? UNWEIGHTED;
-          scanWeighted(P.data, P.starts, P.offs, corpus.n, P.table, patLen, kmax, P.out, P.st, mask, midWord, denom);
-        } else scanPlain(P.data, P.offs, corpus.n, P.table, patLen, kmax, P.out, P.st, 0, 0, 0);
+        if (rule) scanWeighted(P.data, P.starts, P.offs, corpus.n, P.table, patLen, kmax, P.out, P.st, rule.mask, rule.midWord, rule.denom);
+        else scanPlain(P.data, P.offs, corpus.n, P.table, patLen, kmax, P.out, P.st, 0, 0, 0);
         return out;
       },
     };

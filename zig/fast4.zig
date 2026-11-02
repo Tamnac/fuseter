@@ -121,6 +121,7 @@ fn scanWeightedImpl(
             const raw = table[text[j - 1]];
             const at_start = text_flags[j - 1] != 0;
             const cm = if (at_start) raw else raw & not_w;
+            const c1 = if (mid_word == 1) not_w | (raw & w) else not_w;
             const swap: u32 = if (D) prev_raw & (raw << 1) & (if (at_start) ~@as(u32, 0) else not_w) else 0;
             prev_raw = raw;
             var old_l: u32 = 0;
@@ -135,10 +136,9 @@ fn scanWeightedImpl(
                 const o2 = st2[iu];
                 var nv: u32 = ((oi << 1) | 1) & cm;
                 if (i != 0) {
-                    nv |= ((((old_l | new_l) << 1) | 1) & not_w) | old_l;
+                    nv |= (((old_l << 1) | 1) & c1) | ((new_l << 1) & not_w) | old_l;
                     if (D) nv |= ((older_l << 2) | 2) & swap;
                     if (i >= 2) nv |= (((old_l2 | new_l2) << 1) | 1) & w;
-                    if (mid_word == 1) nv |= ((old_l << 1) | 1) & raw & w;
                 }
                 st[iu] = nv;
                 st2[iu] = oi;

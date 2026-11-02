@@ -205,7 +205,7 @@ pub fn Scan(comptime T: type, comptime L: usize, comptime D: bool, comptime MS: 
         // `flags` is laid out like `data` (one word-start byte per text position and lane).
 
         const Carry = struct { old_l: V, new_l: V, older_l: V, old_l2: V, new_l2: V };
-        const Row = struct { cm: V, raw: V, swap: V, active: B };
+        const Row = struct { cm: V, c1: V, swap: V, active: B };
         const Weights = struct { w: V, not_w: V, mid: bool };
 
         inline fn loadRow(row_ptr: [*]const u16, flag_ptr: [*]const u8, table: [*]const T, prev: *V, wt: Weights, active: B) Row {
@@ -216,15 +216,15 @@ pub fn Scan(comptime T: type, comptime L: usize, comptime D: bool, comptime MS: 
             const at_start = fv != @as(@Vector(L, u8), @splat(0));
             const swap = if (D) prev.* & (raw +% raw) & @select(T, at_start, splat(~@as(T, 0)), wt.not_w) else splat(0);
             prev.* = raw;
-            return .{ .cm = @select(T, at_start, raw, raw & wt.not_w), .raw = raw, .swap = swap, .active = active };
+            const c1 = if (wt.mid) wt.not_w | (raw & wt.w) else wt.not_w;
+            return .{ .cm = @select(T, at_start, raw, raw & wt.not_w), .c1 = c1, .swap = swap, .active = active };
         }
 
         inline fn levelW(comptime masked: bool, comptime first: bool, ge2: bool, c: *Carry, row: Row, wt: Weights, oi: V, o2: V) V {
             const one = splat(1);
             var nv = ((oi +% oi) | one) & row.cm;
             if (!first) {
-                const m = c.old_l | c.new_l;
-                nv |= (((m +% m) | one) & wt.not_w) | c.old_l;
+                nv |= (((c.old_l +% c.old_l) | one) & row.c1) | ((c.new_l +% c.new_l) & wt.not_w) | c.old_l;
                 if (D) {
                     const d = c.older_l +% c.older_l;
                     nv |= ((d +% d) | splat(2)) & row.swap;
@@ -233,7 +233,6 @@ pub fn Scan(comptime T: type, comptime L: usize, comptime D: bool, comptime MS: 
                     const m2 = c.old_l2 | c.new_l2;
                     nv |= ((m2 +% m2) | one) & wt.w;
                 }
-                if (wt.mid) nv |= ((c.old_l +% c.old_l) | one) & row.raw & wt.w;
             }
             if (masked) nv = @select(T, row.active, nv, oi);
             c.older_l = o2;

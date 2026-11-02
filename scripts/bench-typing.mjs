@@ -1,4 +1,4 @@
-// Usage: node scripts/bench-typing.mjs [books.json]   Search time of the typing heuristics against the standard kernels, per backend.
+// Usage: [TIERS=simd,wasm,js] [VARIANTS=standard,both,...] node scripts/bench-typing.mjs [books.json]   Search time of the typing heuristics against the standard kernels, per backend.
 import { readFileSync } from "node:fs";
 import { FastFuse } from "../src/index.mjs";
 
@@ -23,9 +23,10 @@ function interleave(fns, rounds = 15, targetMs = 25) {
 
 const fmt = x => +x.toFixed(x < 10 ? 3 : 1);
 console.log(`${books.length} docs`);
-for (const backend of ["simd", "wasm", "js"]) {
+for (const backend of (process.env.TIERS ?? "simd,wasm,js").split(",")) {
   const built = {};
   for (const [name, typing] of Object.entries(variants)) {
+    if (process.env.VARIANTS && !process.env.VARIANTS.split(",").includes(name)) continue;
     built[name] = await FastFuse.create(books, { keys, typing }, { backend, fallback: "throw" });
   }
   for (const threshold of [0.3, 0.6]) {

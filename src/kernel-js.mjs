@@ -90,6 +90,7 @@ function scanWeighted(corpus, patLen, T, kmax, rule, transposition, out, S, S2) 
     outer: for (let j = textLen; j >= 1; j--) {
       const raw = T[data[ts + j - 1]], atWordStart = starts[ts + j - 1] === 1;
       const cm = atWordStart ? raw : raw & notW;
+      const c1 = midWord === 1 ? notW | (raw & W) : notW;   // pattern bits that may be reached by a substitution or insertion from level i-1
       const swap = transposition ? previous & (raw << 1) & (atWordStart ? -1 : notW) : 0;
       previous = raw;
       let oldL = 0, newL = 0, older = 0, oldL2 = 0, newL2 = 0;
@@ -97,9 +98,8 @@ function scanWeighted(corpus, patLen, T, kmax, rule, transposition, out, S, S2) 
         const oi = S[i], oi2 = S2[i];
         let nv = ((oi << 1) | 1) & cm;
         if (i !== 0) {
-          nv |= (((oldL | newL) << 1) | 1) & notW | oldL | (((older << 2) | 2) & swap);
+          nv |= ((oldL << 1) | 1) & c1 | (newL << 1) & notW | oldL | (((older << 2) | 2) & swap);
           if (i >= 2) nv |= (((oldL2 | newL2) << 1) | 1) & W;
-          if (midWord === 1) nv |= ((oldL << 1) | 1) & raw & W;
         }
         S2[i] = oi; S[i] = nv;
         if (nv & top) { best = i; K = i - 1; if (K < 0) break outer; break; }
