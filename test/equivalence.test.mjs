@@ -92,6 +92,45 @@ describe("matches Fuse (ignoreLocation: true)", () => {
   });
 });
 
+describe("includeMatches matches Fuse", () => {
+  const MATCHES = { includeMatches: true };
+
+  test("object docs, weighted keys", async () => {
+    const r = rng(31), docs = randomDocs(r, 250);
+    await check(docs, { keys: KEYS, ...MATCHES }, randomQueries(r, stringsOf(docs, ["title", "author"]), 40));
+  });
+
+  test("array values and nested paths (refIndex)", async () => {
+    const r = rng(32), docs = randomDocs(r, 250);
+    await check(docs, { keys: ["title", "tags", ["meta", "note"], "meta.n"], ...MATCHES }, randomQueries(r, stringsOf(docs, ["title", "author"]), 30));
+  });
+
+  test("arrays of objects", async () => {
+    const r = rng(33), docs = Array.from({ length: 150 }, () => ({ people: Array.from({ length: r.int(4) }, () => ({ name: randomText(r, 1, 2), aliases: [randomText(r, 1, 2), null, randomText(r, 1, 1)] })) }));
+    await check(docs, { keys: ["people.name", "people.aliases"], ...MATCHES }, randomQueries(r, docs.flatMap(d => d.people.map(p => p.name)), 30), { thresholds: [0.2, 0.5] });
+  });
+
+  test("string collection", async () => {
+    const r = rng(34), docs = Array.from({ length: 300 }, () => randomText(r, 0, 5));
+    await check(docs, MATCHES, randomQueries(r, docs, 40));
+  });
+
+  test("isCaseSensitive", async () => {
+    const r = rng(35), docs = randomDocs(r, 250);
+    await check(docs, { keys: KEYS, isCaseSensitive: true, ...MATCHES }, randomQueries(r, stringsOf(docs, ["title", "author"]), 30), { thresholds: [0.2, 0.5] });
+  });
+
+  test("ignoreDiacritics (indices into the normalised text)", async () => {
+    const r = rng(36), docs = randomDocs(r, 250);
+    await check(docs, { keys: KEYS, ignoreDiacritics: true, ...MATCHES }, ["naivé", "Cafe", "ORSTED", "strasse", "lodz", ...randomQueries(r, stringsOf(docs, ["title"]), 25)], { thresholds: [0.2, 0.5] });
+  });
+
+  test("no field norm, long patterns", async () => {
+    const r = rng(37), docs = randomDocs(r, 200);
+    await check(docs, { keys: ["title", "meta.note"], ignoreFieldNorm: true, ...MATCHES }, randomQueries(r, stringsOf(docs, ["title"]), 20), { thresholds: [0.3, 0.7] });
+  });
+});
+
 describe("limit and query handling", () => {
   test("limit follows Fuse", async () => {
     const docs = randomDocs(rng(21), 100), fuse = fuseFor(docs, { keys: ["title"] });

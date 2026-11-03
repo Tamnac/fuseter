@@ -3,28 +3,11 @@ import assert from "node:assert/strict";
 import { Fuseter } from "../src/index.mjs";
 import { kmaxFor } from "../src/kernel-js.mjs";
 import { fieldNorm, textNormalizer } from "../src/text.mjs";
-import { rng, randomText, randomQueries, stringsOf, compare, fuseFor, edit } from "./helpers.mjs";
+import { rng, randomText, randomQueries, stringsOf, compare, fuseFor, edit, minErrors } from "./helpers.mjs";
 
 const BACKENDS = (process.env.BACKENDS ?? "simd,wasm,js").split(",");
 const THRESHOLDS = [0, 0.2, 0.4, 0.6, 1];
 const alnum = ch => /^[\p{L}\p{N}]$/u.test(ch);
-
-// Plain O(m*n) approximate substring match: fewest edits between the pattern and any substring of the text
-// (with `prefix`: any prefix of the text). With `transposed`, swapping two adjacent characters is one edit (optimal string alignment distance).
-function minErrors(pattern, text, transposed, prefix = false) {
-  const m = pattern.length, rows = [Array.from({ length: m + 1 }, (_, i) => i)];
-  let best = m;
-  for (let j = 1; j <= text.length; j++) {
-    const prev = rows[j - 1], row = [prefix ? j : 0];
-    for (let i = 1; i <= m; i++) {
-      row[i] = Math.min(prev[i - 1] + (pattern[i - 1] === text[j - 1] ? 0 : 1), prev[i] + 1, row[i - 1] + 1);
-      if (transposed && i > 1 && j > 1 && pattern[i - 1] === text[j - 2] && pattern[i - 2] === text[j - 1]) row[i] = Math.min(row[i], rows[j - 2][i - 2] + 1);
-    }
-    best = Math.min(best, row[m]);
-    rows.push(row);
-  }
-  return best;
-}
 
 // Word-start flags per character of the normalised text (one flag per UTF-16 unit, like the index).
 function wordStartFlags(raw, normalize) {

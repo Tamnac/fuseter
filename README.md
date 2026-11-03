@@ -27,9 +27,9 @@ The same measurements without Fuse, using a linear scale to better see differenc
 
 | tier | needs | download (gzip) | search, 10K docs, threshold 0.3 |
 |---|---|---|---|
-| `simd` | WebAssembly SIMD (all current browsers and Node) | 25 KB | 0.4-0.7 ms |
-| `wasm` | WebAssembly | 12.7 KB | 2-3 ms |
-| `js` | nothing | 8.7 KB | 4-5 ms |
+| `simd` | WebAssembly SIMD (all current browsers and Node) | 27.5 KB | 0.4-0.7 ms |
+| `wasm` | WebAssembly | 15.2 KB | 2-3 ms |
+| `js` | nothing | 11.2 KB | 4-5 ms |
 | Fuse 7.5 | nothing | | 40-200 ms |
 
 What to choose:
@@ -45,13 +45,37 @@ To see what you end up with, check `ff.backend` and `ff.fallbackReason`.
 
 **Will be fixed in later versions:**
 - `ignoreLocation` is always on (and is the default here). `location` and `distance` are accepted and ignored.
-- Not supported, rejected with a `TypeError`: `useExtendedSearch`, `useTokenSearch`, `includeMatches`, `findAllMatches`, `minMatchCharLength > 1`, `shouldSort: false`, `sortFn`, `getFn` (also per key), unknown options, non-string queries.
+- Not supported, rejected with a `TypeError`: `useExtendedSearch`, `useTokenSearch`, `findAllMatches`, `minMatchCharLength > 1`, `shouldSort: false`, `sortFn`, `getFn` (also per key), unknown options, non-string queries.
 
-**Supported:** string collections, `keys` (names, dotted paths, path arrays, weights), array values (each element is a separate string like in Fuse, at most 64 strings per document), numbers and booleans as text, `threshold` (also per search), `limit`, `includeScore`, `isCaseSensitive`, `ignoreDiacritics`, `ignoreFieldNorm`, `fieldNormWeight`, blank queries (return every document, like Fuse), patterns longer than 32 characters (chunked like Fuse, slower: no in-wasm combine).
+**Supported:** string collections, `keys` (names, dotted paths, path arrays, weights), array values (each element is a separate string like in Fuse, at most 64 strings per document), numbers and booleans as text, `threshold` (also per search), `limit`, `includeScore`, `includeMatches` (see below), `isCaseSensitive`, `ignoreDiacritics`, `ignoreFieldNorm`, `fieldNormWeight`, blank queries (return every document, like Fuse), patterns longer than 32 characters (chunked like Fuse, slower: no in-wasm combine).
 
 **Deliberate differences:**
 - `ignoreDiacritics` strips `\p{M}`, Fuse uses a fixed list of marks; 73 recently added code points differ.
 - Objects inside array values are ignored (Fuse indexes `"[object Object]"`).
+
+## Match highlighting
+
+`includeMatches: true` adds `matches` to every result, in Fuse's format and with Fuse's indices:
+
+```js
+const books = [{ title: "The Hobbit", tags: ["fantasy", "hobbit"] }];
+const ff = await Fuseter.create(books, { keys: ["title", "tags"], includeMatches: true });
+ff.search("hobit")[0].matches;
+// [{ indices: [[4, 9]], value: "The Hobbit", key: "title" }, { indices: [[0, 5]], value: "hobbit", key: "tags", refIndex: 1 }]
+```
+
+`indices` are inclusive `[start, end]` ranges into `value`. `key` is the key as written (paths joined with `.`) and is absent for collections of strings; `refIndex` is the position in the array when the key's value is an array.
+
+Like Fuse, the ranges mark every exact occurrence of the query, or else every character of the best approximate match that also occurs in the query. They are computed in js for the returned results only, so they cost little with a `limit` and the same on every backend. This also works with the `typing` heuristics, which then decide where the best match is.
+
+`indicesIn: "original"` makes the ranges refer to `value` as it is written. By default (and in Fuse) they refer to the text after lower-casing and, with `ignoreDiacritics`, stripping, which has a different length for `ß` and for decomposed accents (`e` + a combining mark). For other text the two are the same.
+
+### Experimental highlighting
+
+`highlighting: { aligned: true, allOccurrences: true }` (either one, needs `includeMatches`) replaces Fuse's ranges with ones found by aligning the query with the text, using the same costs as the search (also with `typing`). The ranges no longer match Fuse's.
+
+- `aligned`: a range is the text the query was aligned with. For `hary poter` in `Sweet Savage Love Rosemary Rogers` Fuse marks `ary Ro` and `er`, aligned marks `mary Roger`.
+- `allOccurrences`: every place where the query matches within the threshold is marked (`lord` also marks `lard` and `lorrd` at a threshold that allows one error), not only the best one. Without `aligned` each place gets Fuse's character window.
 
 ## Typing heuristics (experimental)
 

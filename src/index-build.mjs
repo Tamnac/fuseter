@@ -8,7 +8,7 @@ function parseKey(key) {
   if (spec === null || typeof spec !== "object" || spec.getFn) throw new TypeError("fuseter: unsupported key definition (getFn is not supported)");
   const { name, weight = 1 } = spec;
   if (!(weight > 0)) throw new RangeError(`fuseter: key weight for '${name}' must be greater than 0`);
-  return { path: Array.isArray(name) ? name : String(name).split("."), weight };
+  return { id: Array.isArray(name) ? name.join(".") : String(name), path: Array.isArray(name) ? name : String(name).split("."), weight };
 }
 
 const leafText = v => typeof v === "string" ? v
@@ -16,13 +16,25 @@ const leafText = v => typeof v === "string" ? v
   : undefined;
 
 // Collects every string reachable through `path`, descending into arrays like Fuse's default getFn.
-function collect(obj, path, i, out) {
+// `at` (optional) receives the position of each string in the innermost array it was found in, undefined outside arrays.
+function collect(obj, path, i, out, at, arrayIndex) {
   if (obj == null) return;
-  if (i === path.length) { const s = leafText(obj); if (s !== undefined && s.trim().length) out.push(s); return; }
+  if (i === path.length) {
+    const s = leafText(obj);
+    if (s !== undefined && s.trim().length) { out.push(s); at?.push(arrayIndex); }
+    return;
+  }
   const v = obj[path[i]];
   if (v == null) return;
-  if (Array.isArray(v)) for (const e of v) collect(e, path, i + 1, out);
-  else collect(v, path, i + 1, out);
+  if (Array.isArray(v)) for (let e = 0; e < v.length; e++) collect(v[e], path, i + 1, out, at, e);
+  else collect(v, path, i + 1, out, at, arrayIndex);
+}
+
+// The strings of one key of one document in slot order, with the array position Fuse reports as refIndex for each (undefined when not inside an array).
+export function slotValues(doc, path) {
+  const texts = [], at = [];
+  collect(doc, path, 0, texts, at);
+  return { texts, at };
 }
 
 // A string for the common case (one plain string value), otherwise an array, or undefined when nothing usable is found.
@@ -85,5 +97,5 @@ export function buildIndex(docs, { keys = [], fieldNormWeight = 1, isCaseSensiti
     if (t.length > maxLen) maxLen = t.length;
   }
   offs[nStr] = p;
-  return { docs, K, nDocs, nStr, keyless, weights, norms, present, corpus: { data, offs, n: nStr, maxLen, starts: wordStartAt } };
+  return { docs, K, nDocs, nStr, keyless, keys: defs.map((def, k) => ({ ...def, base: base[k] })), weights, norms, present, corpus: { data, offs, n: nStr, maxLen, starts: wordStartAt } };
 }

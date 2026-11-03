@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import Fuse from "fuse.js";
 
 export function rng(seed) {
@@ -64,8 +65,26 @@ export function compare(got, want) {
   for (let i = 0; i < got.length; i++) {
     const a = got[i], b = want[i];
     if (a.refIndex !== b.refIndex || a.score !== b.score || a.item !== b.item) return `rank ${i}: #${a.refIndex} ${a.score} != #${b.refIndex} ${b.score}`;
+    if (!isDeepStrictEqual(a.matches, b.matches)) return `matches of #${a.refIndex}: ${JSON.stringify(a.matches)} != ${JSON.stringify(b.matches)}`;
   }
   return null;
 }
 
 export const fuseFor = (docs, options) => new Fuse(docs, { ...options, ignoreLocation: true, includeScore: true });
+
+// Plain O(m*n) approximate substring match: fewest edits between the pattern and any substring of the text
+// (with `prefix`: any prefix of the text). With `transposed`, swapping two adjacent characters is one edit (optimal string alignment distance).
+export function minErrors(pattern, text, transposed, prefix = false) {
+  const m = pattern.length, rows = [Array.from({ length: m + 1 }, (_, i) => i)];
+  let best = m;
+  for (let j = 1; j <= text.length; j++) {
+    const prev = rows[j - 1], row = [prefix ? j : 0];
+    for (let i = 1; i <= m; i++) {
+      row[i] = Math.min(prev[i - 1] + (pattern[i - 1] === text[j - 1] ? 0 : 1), prev[i] + 1, row[i - 1] + 1);
+      if (transposed && i > 1 && j > 1 && pattern[i - 1] === text[j - 2] && pattern[i - 2] === text[j - 1]) row[i] = Math.min(row[i], rows[j - 2][i - 2] + 1);
+    }
+    best = Math.min(best, row[m]);
+    rows.push(row);
+  }
+  return best;
+}

@@ -7,10 +7,19 @@ export interface FuseterOptions {
   /** Default 0.6. Can be overridden per search. */
   threshold?: number;
   includeScore?: boolean;
+  /** Adds `matches` to every result, in Fuse's format. */
+  includeMatches?: boolean;
+  /**
+   * What the `indices` of a match refer to. "normalized" (default) is the lower-cased, diacritic-stripped text, which is what Fuse reports.
+   * "original" maps them back to `value`, which differs when normalisation changes the length of the text (`ß`, combining marks with `ignoreDiacritics`).
+   */
+  indicesIn?: "normalized" | "original";
   isCaseSensitive?: boolean;
   ignoreDiacritics?: boolean;
   ignoreFieldNorm?: boolean;
   fieldNormWeight?: number;
+  /** Experimental, needs `includeMatches`. Changes which ranges are reported, so they no longer match Fuse's, and may change in a minor release. */
+  highlighting?: HighlightingOptions;
   /** Experimental, opt-in typing heuristics. They change the ranking, so results no longer match Fuse, and they may change in a minor release. */
   typing?: TypingOptions;
   /** Only `true` is supported (this is the default here, unlike Fuse). */
@@ -18,6 +27,19 @@ export interface FuseterOptions {
   /** Accepted, no effect while ignoreLocation is on. */
   location?: number;
   distance?: number;
+}
+
+export interface HighlightingOptions {
+  /**
+   * A range is the text the query was aligned with (for "hary poter" in "Rosemary Rogers": "mary Roger"), computed with the same costs as the scan.
+   * Fuse marks every character of the best window that occurs anywhere in the query, which gives scattered fragments for weak matches.
+   */
+  aligned?: boolean;
+  /**
+   * Every place where the query matches within the threshold is marked, best first when picking, not only the best one.
+   * Fuse marks all error-free occurrences but only one approximate one.
+   */
+  allOccurrences?: boolean;
 }
 
 export interface TypingOptions {
@@ -48,10 +70,23 @@ export interface SearchOptions {
   threshold?: number;
 }
 
+export interface FuseterMatch {
+  /** Inclusive [start, end] ranges into `value`, sorted and not touching. */
+  indices: [number, number][];
+  /** The string that matched. */
+  value: string;
+  /** The key, as in Fuse: the name, or the path joined with "."; absent for collections of strings. */
+  key?: string;
+  /** Position in the array `value` was found in, when the key's value is an array. */
+  refIndex?: number;
+}
+
 export interface FuseterResult<T> {
   item: T;
   refIndex: number;
   score?: number;
+  /** With `includeMatches`. */
+  matches?: FuseterMatch[];
 }
 
 export class Fuseter<T = unknown> {

@@ -1,20 +1,22 @@
 import { buildIndex } from "./index-build.mjs";
+import { resolveHighlighting } from "./matches.mjs";
 import { createSearcher } from "./search.mjs";
 import { textNormalizer } from "./text.mjs";
 import { resolveTyping } from "./typing.mjs";
 
 const TIERS = ["simd", "wasm", "js"];   // fastest first
 const FALLBACKS = ["js", "wasm", "throw"];
+const INDICES_IN = ["normalized", "original"];
 
 const OPTION_DEFAULTS = {
-  keys: [], threshold: 0.6, includeScore: false, isCaseSensitive: false, ignoreDiacritics: false,
+  keys: [], threshold: 0.6, includeScore: false, includeMatches: false, indicesIn: "normalized", highlighting: null, isCaseSensitive: false, ignoreDiacritics: false,
   ignoreFieldNorm: false, fieldNormWeight: 1,
   typing: null,   // opt-in heuristics, not Fuse compatible (see typing.mjs)
 };
 // Accepted for compatibility; they have no effect while ignoreLocation is on.
 const IGNORED_OPTIONS = ["location", "distance"];
 const UNSUPPORTED = {
-  useExtendedSearch: false, useTokenSearch: false, includeMatches: false, findAllMatches: false, minMatchCharLength: 1,
+  useExtendedSearch: false, useTokenSearch: false, findAllMatches: false, minMatchCharLength: 1,
   shouldSort: true, sortFn: undefined, getFn: undefined, ignoreLocation: true,
 };
 
@@ -24,7 +26,10 @@ function resolveOptions(options) {
     if (!(name in UNSUPPORTED)) throw new TypeError(`fuseter: unknown option '${name}'`);
     if (options[name] !== UNSUPPORTED[name]) throw new TypeError(`fuseter: option '${name}' is not supported (only ${JSON.stringify(UNSUPPORTED[name])})`);
   }
-  return { ...OPTION_DEFAULTS, ...options };
+  const resolved = { ...OPTION_DEFAULTS, ...options };
+  if (!INDICES_IN.includes(resolved.indicesIn)) throw new TypeError(`fuseter: indicesIn must be one of ${INDICES_IN.join(", ")}`);
+  if (resolveHighlighting(resolved.highlighting) && !resolved.includeMatches) throw new TypeError("fuseter: 'highlighting' needs includeMatches");
+  return resolved;
 }
 
 // Builds the Fuseter class for the given set of backends ({ simd?, wasm?, js }); each package entry point passes only what it ships.
@@ -71,7 +76,7 @@ export function defineFuseter(backends, defaultBackend) {
         if (failures.some(([t]) => t === tier)) continue;
         try {
           const scanner = backends[tier].create(index, { ignoreFieldNorm: o.ignoreFieldNorm, transposition: this._typing.transposition });
-          const searcher = createSearcher(index, scanner, { ...o, typing: this._typing, normalize: textNormalizer(o) });
+          const searcher = createSearcher(index, scanner, { ...o, highlighting: resolveHighlighting(o.highlighting), typing: this._typing, normalize: textNormalizer(o) });
           this._search = searcher.search;
           this.timings = searcher.timings;
           this.backend = tier;
@@ -84,7 +89,7 @@ export function defineFuseter(backends, defaultBackend) {
       throw new Error(`fuseter: backend '${tier}' failed and no fallback is allowed: ${cause.message}`, { cause });
     }
 
-    // Returns [{ item, refIndex, score? }] ordered like Fuse; `threshold` here overrides the constructor option for this call.
+    // Returns [{ item, refIndex, score?, matches? }] ordered like Fuse; `threshold` here overrides the constructor option for this call.
     search(query, searchOptions) { return this._search(query, searchOptions); }
   };
 }

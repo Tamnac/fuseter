@@ -123,3 +123,59 @@ export function jsScanner(corpus, { transposition = false } = {}) {
     },
   };
 }
+
+// Where the matches of a pattern lie, for includeMatches. It runs the recurrences of scanWeighted (a plain or transposed scan is the weighted one with
+// nothing weighted) without dropping levels, so it can report what Fuse reports: the start of a match at the best level, plus every start
+// of an error-free match. `find(s, expected)` returns { level, start, exact } (a reused object; `exact` lists the error-free starts, last to first) or
+// null when no level up to kmax matches. `table` is the char table of the prepared pattern.
+// Fuse scans each level from the end of the text towards `expected` (the chunk's start in the pattern, 0 for patterns of up to 32 characters) and
+// stops at the first match at or before it; after a match at a start p beyond it, only starts from 2 * expected - p on are still considered. `start` is
+// the last match accepted that way, which is the lowest start only when expected is 0.
+export function createLocator(corpus, transposition) {
+  const { data, offs, starts } = corpus;
+  const table = new Int32Array(65536), S = new Int32Array(64), S2 = new Int32Array(64), init = new Int32Array(64), lowest = new Int32Array(64), floor = new Int32Array(64);
+  const previous = [], found = { level: -1, start: -1, exact: [] };
+  let patLen = 0, kmax = 0, W = 0, midWord = 1;
+
+  function prep(pattern, maxErrors, rule) {
+    fillCharTable(table, pattern, previous);
+    patLen = pattern.length; kmax = maxErrors; W = rule?.mask ?? 0; midWord = rule?.midWord ?? 1;
+    init.fill(0, 0, kmax + 1);
+    for (let b = 0, cost = 0; b < patLen && (cost += 1 + ((W >>> b) & 1)) <= kmax; b++) for (let i = cost; i <= kmax; i++) init[i] |= 1 << b;
+  }
+
+  function find(s, expected) {
+    const ts = offs[s], textLen = offs[s + 1] - ts, notW = ~W, top = 1 << (patLen - 1);
+    if (textLen < patLen - kmax) return null;
+    lowest.fill(-1, 0, kmax + 1); floor.fill(1, 0, kmax + 1);
+    found.exact.length = 0;
+    for (let i = 0; i <= kmax; i++) S[i] = S2[i] = init[i];
+    let last = 0;
+    for (let j = textLen; j >= 1; j--) {
+      const raw = table[data[ts + j - 1]], atWordStart = Boolean(starts) && starts[ts + j - 1] === 1;
+      const cm = atWordStart ? raw : raw & notW;
+      const c1 = midWord === 1 ? notW | (raw & W) : notW;
+      const swap = transposition ? last & (raw << 1) & (atWordStart ? -1 : notW) : 0;
+      last = raw;
+      let oldL = 0, newL = 0, older = 0, oldL2 = 0, newL2 = 0;
+      for (let i = 0; i <= kmax; i++) {
+        const oi = S[i], oi2 = S2[i];
+        let nv = ((oi << 1) | 1) & cm;
+        if (i !== 0) {
+          nv |= ((oldL << 1) | 1) & c1 | (newL << 1) & notW | oldL | (((older << 2) | 2) & swap);
+          if (i >= 2) nv |= (((oldL2 | newL2) << 1) | 1) & W;
+        }
+        S2[i] = oi; S[i] = nv;
+        if (nv & top) {
+          if (i === 0) found.exact.push(j - 1);
+          if (j >= floor[i]) { lowest[i] = j - 1; floor[i] = j - 1 <= expected ? textLen + 1 : Math.max(1, 2 * expected - j + 1); }
+        }
+        older = oi2; oldL2 = oldL; newL2 = newL; oldL = oi; newL = nv;
+      }
+    }
+    for (let i = 0; i <= kmax; i++) if (lowest[i] >= 0) { found.level = i; found.start = lowest[i]; return found; }
+    return null;
+  }
+
+  return { table, prep, find };
+}

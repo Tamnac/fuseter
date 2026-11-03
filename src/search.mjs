@@ -1,35 +1,33 @@
 import { kmaxFor } from "./kernel-js.mjs";
+import { createMatcher, equalsPattern } from "./matches.mjs";
 import { weightRule } from "./typing.mjs";
 
 const MAX_BITS = 32;
 
 // Fuse splits patterns longer than 32 characters into 32-character chunks; the last chunk overlaps the previous one.
+// `start` is where the chunk begins in the pattern (Fuse searches a chunk with that expected location).
 function chunksOf(pattern) {
-  if (pattern.length <= MAX_BITS) return [pattern];
+  if (pattern.length <= MAX_BITS) return [{ pattern, start: 0 }];
   const chunks = [], remainder = pattern.length % MAX_BITS, end = pattern.length - remainder;
-  for (let i = 0; i < end; i += MAX_BITS) chunks.push(pattern.substr(i, MAX_BITS));
-  if (remainder) chunks.push(pattern.substr(pattern.length - MAX_BITS));
+  for (let i = 0; i < end; i += MAX_BITS) chunks.push({ pattern: pattern.substr(i, MAX_BITS), start: i });
+  if (remainder) chunks.push({ pattern: pattern.substr(pattern.length - MAX_BITS), start: pattern.length - MAX_BITS });
   return chunks;
 }
 
-export function createSearcher(index, scanner, { threshold: defaultThreshold, ignoreFieldNorm, includeScore, normalize, typing }) {
-  const { docs, K, nDocs, weights, norms, present, keyless, corpus } = index, { data, offs } = corpus;
+export function createSearcher(index, scanner, { threshold: defaultThreshold, ignoreFieldNorm, includeScore, includeMatches, indicesIn, highlighting, normalize, typing }) {
+  const { docs, K, nDocs, weights, norms, present, keyless, corpus } = index;
   const exactScore = keyless ? 0 : Number.EPSILON;
   const docScore = new Float64Array(nDocs), hitIds = new Int32Array(nDocs);
   let merged = null, matched = null;   // chunked patterns only
+  const matcher = includeMatches ? createMatcher(index, { transposition: typing.transposition, normalize, original: indicesIn === "original", highlighting }) : null;
   const timings = { scan: 0, combine: 0, format: 0 };
-
-  const equalsPattern = (s, q) => {
-    for (let i = 0, p = offs[s]; i < q.length; i++, p++) if (data[p] !== q.charCodeAt(i)) return false;
-    return true;
-  };
 
   // Chunk scores are summed per string like Fuse does (a chunk without a match counts 1); -1 marks strings no chunk matched.
   function scanChunks(chunks, kmax) {
     merged ??= new Float64Array(corpus.n); matched ??= new Uint8Array(corpus.n);
     merged.fill(0); matched.fill(0);
     for (const chunk of chunks) {
-      scanner.prep(chunk);
+      scanner.prep(chunk.pattern);
       const out = scanner.scan(MAX_BITS, kmax);
       for (let s = 0; s < corpus.n; s++) {
         const v = out[s];
@@ -42,7 +40,6 @@ export function createSearcher(index, scanner, { threshold: defaultThreshold, ig
 
   // Scores every document that matched in at least one slot and returns the hit count; ids/scores land in hitIds/docScore.
   function combine(scores, q) {
-    const patLen = q.length;
     let m = 0;
     for (let d = 0; d < nDocs; d++) {
       let total = 1, any = false;
@@ -50,7 +47,7 @@ export function createSearcher(index, scanner, { threshold: defaultThreshold, ig
         const s = d * K + k;
         let v = scores[s];
         if (v < 0 || !present[s]) continue;
-        if (offs[s + 1] - offs[s] === patLen && equalsPattern(s, q)) v = 0;
+        if (equalsPattern(corpus, s, q)) v = 0;
         any = true;
         total *= Math.pow(v === 0 ? exactScore : v, weights[k] * (ignoreFieldNorm ? 1 : norms[s]));
       }
@@ -114,6 +111,10 @@ export function createSearcher(index, scanner, { threshold: defaultThreshold, ig
       t2 = performance.now();
       res = new Array(sorted.length);
       for (let i = 0; i < sorted.length; i++) res[i] = result(sorted[i], docScore[sorted[i]]);
+    }
+    if (matcher) {
+      const matches = matcher(res.map(r => r.refIndex), q, chunks, kmax, rule);
+      for (let i = 0; i < res.length; i++) res[i].matches = matches[i];
     }
     timings.scan = t1 - t0; timings.combine = t2 - t1; timings.format = performance.now() - t2;
     return res;
