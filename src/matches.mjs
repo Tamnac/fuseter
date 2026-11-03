@@ -1,6 +1,5 @@
 import { createAligner } from "./align.mjs";
 import { createLocator } from "./kernel-js.mjs";
-import { slotValues } from "./index-build.mjs";
 
 export function equalsPattern({ data, offs }, s, q) {
   if (offs[s + 1] - offs[s] !== q.length) return false;
@@ -52,18 +51,32 @@ export function resolveHighlighting(highlighting) {
   return aligned || allOccurrences ? { aligned: Boolean(aligned), allOccurrences: Boolean(allOccurrences) } : null;
 }
 
-// Computes Fuse's `matches` for result documents. The kernels only produce scores, so this runs after sorting and limiting, only for the documents
-// that are returned, in js on every backend.
-// Fuse's indices (bitap/search.ts) are a character mask over the normalised text: every non-overlapping error-free occurrence of the pattern, plus every
-// character that occurs in the pattern within [start, start + patLen - 1 + level], where start is the lowest start of a match at the best error level.
-// Chunks of long patterns are searched one by one and their ranges merged.
-export function createMatcher(index, { transposition, normalize, original, highlighting }) {
-  const { docs, K, keyless, keys, present, corpus } = index, { data, offs } = corpus;
-  const locator = createLocator(corpus, transposition), aligner = highlighting && createAligner(corpus, transposition);
+// The strings of each document in slot order: [{ s, keyDef, value, refIndex, ranges: [] }] for the present slots (keyDef is undefined for collections of strings).
+export function createSlotReader({ K, keyless, keys, present, values, refAt }) {
+  const keyDefs = new Array(K);
+  if (!keyless) for (const keyDef of keys) keyDefs.fill(keyDef, keyDef.base, keyDef.base + keyDef.width);
+  return function slotsOf(d) {
+    const slots = [];
+    for (let s = d * K; s < d * K + K; s++) {
+      if (present[s]) slots.push({ s, keyDef: keyDefs[s - d * K], value: values[s], refIndex: refAt[s] < 0 ? undefined : refAt[s], ranges: [] });
+    }
+    return slots;
+  };
+}
+
+// Fuse drops the ranges shorter than minMatchCharLength (convertMaskToIndices), and a string left without any is not a match.
+const dropShort = (ranges, minLength) => minLength > 1 ? ranges.filter(([from, to]) => to - from + 1 >= minLength) : ranges;
+
+// Fuse's character mask over the normalised text of a string (what `includeMatches` reports) as ranges, for the pattern chunk given to `prep`.
+// `ranges(s, patLen, start)` returns null when the chunk does not match string `s`, else the (possibly empty) ranges of at least minLength characters.
+// Every non-overlapping error-free occurrence of the pattern is marked, plus every character that occurs in the pattern within [start, start + patLen - 1 + level],
+// where start is the lowest start of a match at the best error level (see createLocator).
+export function createRangeFinder(corpus, { transposition, minLength }) {
+  const { data, offs } = corpus, locator = createLocator(corpus, transposition), { table } = locator;
   let mask = new Uint8Array(0);
 
   function chunkRanges(s, patLen, expected, { level, start, exact }) {
-    const ts = offs[s], textLen = offs[s + 1] - ts, { table } = locator;
+    const ts = offs[s], textLen = offs[s + 1] - ts;
     if (mask.length < textLen) mask = new Uint8Array(textLen);
     mask.fill(0, 0, textLen);
     if (level === 0) {
@@ -78,12 +91,31 @@ export function createMatcher(index, { transposition, normalize, original, highl
     for (let i = 0, from = -1; i <= textLen; i++) {
       if (i < textLen && mask[i]) { if (from < 0) from = i; } else if (from >= 0) { ranges.push([from, i - 1]); from = -1; }
     }
-    return ranges;
+    return dropShort(ranges, minLength);
   }
 
+  return {
+    prep: locator.prep,
+    // `start` is where the chunk begins in the whole pattern, which Fuse uses as the expected location.
+    ranges(s, patLen, start) {
+      const expected = Math.min(start, offs[s + 1] - offs[s]), found = locator.find(s, expected);
+      return found && chunkRanges(s, patLen, expected, found);
+    },
+  };
+}
+
+// Computes Fuse's `matches` for result documents. The kernels only produce scores, so this runs after sorting and limiting, only for the documents
+// that are returned (with a `sortFn`, for every hit), in js on every backend. Ranges are those of createRangeFinder; chunks of long patterns are searched
+// one by one and their ranges merged.
+export function createMatcher(index, { slotsOf, transposition, minLength, normalize, original, highlighting }) {
+  const { corpus } = index, { data, offs } = corpus;
+  const finder = createRangeFinder(corpus, { transposition, minLength }), aligner = highlighting && createAligner(corpus, transposition);
+
   // The experimental ranges: around every alignment, or only the first, as the alignment itself or as Fuse's window of characters.
-  function alignedRanges(s, patLen, pattern, spans) {
-    const ts = offs[s], textLen = offs[s + 1] - ts, ranges = [];
+  function alignedRanges(s, pattern) {
+    const spans = aligner.find(s);
+    if (!spans) return null;
+    const ts = offs[s], textLen = offs[s + 1] - ts, patLen = pattern.length, ranges = [];
     for (const { from, to, cost } of highlighting.allOccurrences ? spans : spans.slice(0, 1)) {
       if (highlighting.aligned) { ranges.push([from, to]); continue; }
       const last = Math.min(textLen - 1, from + patLen - 1 + cost);
@@ -94,43 +126,26 @@ export function createMatcher(index, { transposition, normalize, original, highl
         else if (!inPattern && run >= 0) { ranges.push([run, k - 1]); run = -1; }
       }
     }
-    return ranges;
+    return dropShort(ranges, minLength);
   }
 
-  // One entry per string slot of the documents that could have matched: { s, key, refIndex, value, ranges }.
-  function slotsOf(d) {
-    const slots = [], add = (s, value, key, refIndex) => { if (present[s]) slots.push({ s, key, refIndex, value, ranges: [] }); };
-    if (keyless) add(d * K, docs[d]);
-    else for (const key of keys) {
-      const { texts, at } = slotValues(docs[d], key.path);
-      for (let j = 0; j < texts.length; j++) add(d * K + key.base + j, texts[j], key.id, at[j]);
-    }
-    return slots;
-  }
-
-  // The `matches` array of each document in `ids`: one entry per string that matched, in key order.
+  // For each document in `ids`, the slots that matched in key order, each with its merged `indices` (see slotsOf for the other fields).
   return function matchesFor(ids, q, chunks, kmax, rule) {
     const perDoc = ids.map(slotsOf), pending = [];
     for (const slots of perDoc) for (const slot of slots) {
-      if (equalsPattern(corpus, slot.s, q)) slot.ranges.push([0, q.length - 1]); else pending.push(slot);
+      if (!equalsPattern(corpus, slot.s, q)) pending.push(slot);
+      else if (q.length >= minLength) slot.ranges.push([0, q.length - 1]);
     }
     for (const { pattern, start } of chunks) {
-      if (highlighting) aligner.prep(pattern, kmax, rule); else locator.prep(pattern, kmax, rule);
+      if (highlighting) aligner.prep(pattern, kmax, rule); else finder.prep(pattern, kmax, rule);
       for (const slot of pending) {
-        if (highlighting) {
-          const found = aligner.find(slot.s);
-          if (found) slot.ranges.push(...alignedRanges(slot.s, pattern.length, pattern, found));
-          continue;
-        }
-        const expected = Math.min(start, offs[slot.s + 1] - offs[slot.s]), found = locator.find(slot.s, expected);
-        if (found) slot.ranges.push(...chunkRanges(slot.s, pattern.length, expected, found));
+        const found = highlighting ? alignedRanges(slot.s, pattern) : finder.ranges(slot.s, pattern.length, start);
+        if (found) slot.ranges.push(...found);
       }
     }
-    return perDoc.map(slots => slots.filter(slot => slot.ranges.length).map(({ ranges, value, key, refIndex }) => {
-      const indices = mergeIndices(ranges), match = { indices: original ? toOriginal(value, indices, normalize) : indices, value };
-      if (key !== undefined) match.key = key;
-      if (refIndex !== undefined) match.refIndex = refIndex;
-      return match;
+    return perDoc.map(slots => slots.filter(slot => slot.ranges.length).map(slot => {
+      const indices = mergeIndices(slot.ranges);
+      return { ...slot, indices: original ? toOriginal(slot.value, indices, normalize) : indices };
     }));
   };
 }

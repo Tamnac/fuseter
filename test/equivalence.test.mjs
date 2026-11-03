@@ -157,3 +157,62 @@ describe("limit and query handling", () => {
   });
 });
 
+
+describe("ordering and matching options match Fuse", () => {
+  const queries = (r, docs, count) => randomQueries(r, stringsOf(docs, ["title", "author"]), count);
+
+  test("shouldSort: false", async () => {
+    const r = rng(41), docs = randomDocs(r, 250);
+    await check(docs, { keys: KEYS, shouldSort: false }, queries(r, docs, 30), { limits: [undefined, 3, 0] });
+    const strings = Array.from({ length: 200 }, () => randomText(r, 0, 5));
+    await check(strings, { shouldSort: false, includeMatches: true }, randomQueries(r, strings, 20), { thresholds: [0.3, 0.7] });
+  });
+
+  test("sortFn", async () => {
+    const r = rng(42), docs = randomDocs(r, 250);
+    const byLength = (a, b) => b.matches[0].value.length - a.matches[0].value.length || b.score - a.score;
+    const byShape = (a, b) => JSON.stringify(a.matches).localeCompare(JSON.stringify(b.matches));   // fails unless the records are Fuse's
+    for (const sortFn of [byLength, byShape, (a, b) => b.score - a.score, (a, b) => String(b.item[0]?.v).localeCompare(String(a.item[0]?.v))]) {
+      await check(docs, { keys: KEYS, sortFn }, queries(r, docs, 20), { thresholds: [0.3, 0.7], limits: [undefined, 3] });
+      await check(docs, { keys: ["title", "tags"], sortFn, includeMatches: true }, queries(r, docs, 20), { thresholds: [0.3, 0.7], limits: [undefined, 5] });
+    }
+    const strings = Array.from({ length: 200 }, () => randomText(r, 0, 5));
+    await check(strings, { sortFn: byShape }, randomQueries(r, strings, 20), { thresholds: [0.3, 0.7] });
+  });
+
+  test("limit with shouldSort: false and sortFn follows Fuse", async () => {
+    const docs = randomDocs(rng(53), 100);
+    for (const extra of [{ shouldSort: false }, { sortFn: (a, b) => b.score - a.score }]) {
+      const options = { keys: ["title"], ...extra }, fuse = fuseFor(docs, options), ff = await Fuseter.create(docs, { ...options, includeScore: true });
+      for (const limit of [0, 1, 2.7, 1000, -1, Infinity, undefined]) assert.equal(compare(ff.search("a", { limit }), fuse.search("a", { limit })), null, `${Object.keys(extra)} limit ${limit}`);
+    }
+  });
+
+  for (const minMatchCharLength of [2, 3, 5]) {
+    test(`minMatchCharLength ${minMatchCharLength}`, async () => {
+      const r = rng(43 + minMatchCharLength), docs = randomDocs(r, 250);
+      await check(docs, { keys: KEYS, minMatchCharLength }, queries(r, docs, 40), { thresholds: [0.1, 0.3, 0.6] });
+      await check(docs, { keys: ["title", "tags"], minMatchCharLength, includeMatches: true }, queries(r, docs, 40), { thresholds: [0.1, 0.3, 0.6] });
+    });
+  }
+
+  test("minMatchCharLength on a string collection, with shouldSort: false", async () => {
+    const r = rng(50), docs = Array.from({ length: 300 }, () => randomText(r, 0, 5));
+    await check(docs, { minMatchCharLength: 3, shouldSort: false, includeMatches: true }, ["a", "x", "ab", "abc", ...randomQueries(r, docs, 40)], { thresholds: [0.2, 0.6] });
+  });
+
+  test("findAllMatches has no effect with ignoreLocation", async () => {
+    const r = rng(51), docs = randomDocs(r, 250);
+    await check(docs, { keys: KEYS, findAllMatches: true, includeMatches: true }, queries(r, docs, 40), { thresholds: [0.2, 0.5, 0.8] });
+  });
+
+  test("getFn and per-key getFn", async () => {
+    const r = rng(52), docs = randomDocs(r, 250);
+    const upper = doc => doc?.title == null ? undefined : String(doc.title).toUpperCase() + " x";
+    const spread = doc => [doc.author, null, { v: doc.title, i: 7 }, { v: 42 }, 17, ["nested"], doc.tags?.[0]];
+    const keys = [{ name: "title", getFn: upper, weight: 2 }, { name: "author", getFn: spread }, { name: ["meta", "note"] }, "tags"];
+    const getFn = (doc, path) => { const v = path.reduce((o, p) => o?.[p], doc); return typeof v === "string" ? v.split(" ").reverse().join(" ") : Array.isArray(v) ? v.map(String) : v; };
+    await check(docs, { keys, includeMatches: true }, queries(r, docs, 30), { thresholds: [0.2, 0.5] });
+    await check(docs, { keys, getFn, includeMatches: true }, queries(r, docs, 30), { thresholds: [0.2, 0.5] });
+  });
+});

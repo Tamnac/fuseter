@@ -44,14 +44,21 @@ To see what you end up with, check `ff.backend` and `ff.fallbackReason`.
 ## Differences from Fuse
 
 **Will be fixed in later versions:**
-- `ignoreLocation` is always on (and is the default here). `location` and `distance` are accepted and ignored.
-- Not supported, rejected with a `TypeError`: `useExtendedSearch`, `useTokenSearch`, `findAllMatches`, `minMatchCharLength > 1`, `shouldSort: false`, `sortFn`, `getFn` (also per key), unknown options, non-string queries.
+- `ignoreLocation` is always on (and is the default here). `location`, `distance` and `findAllMatches` are accepted and ignored (with `ignoreLocation`, `findAllMatches` changes nothing in Fuse either).
+- Not supported, rejected with a `TypeError`: `useExtendedSearch`, `useTokenSearch`, unknown options, non-string queries.
+- Not provided: `Fuse.match`, `Fuse.parseQuery`, `Fuse.use`.
 
-**Supported:** string collections, `keys` (names, dotted paths, path arrays, weights), array values (each element is a separate string like in Fuse, at most 64 strings per document), numbers and booleans as text, `threshold` (also per search), `limit`, `includeScore`, `includeMatches` (see below), `isCaseSensitive`, `ignoreDiacritics`, `ignoreFieldNorm`, `fieldNormWeight`, blank queries (return every document, like Fuse), patterns longer than 32 characters (chunked like Fuse, slower: no in-wasm combine).
+**Supported:** string collections, `keys` (names, dotted paths, path arrays, weights), array values (each element is a separate string like in Fuse, at most 64 strings per document), numbers and booleans as text, `threshold` (also per search), `limit`, `shouldSort`, `sortFn`, `getFn` (also per key), `minMatchCharLength`, `includeScore`, `includeMatches` (see below), `isCaseSensitive`, `ignoreDiacritics`, `ignoreFieldNorm`, `fieldNormWeight`, blank queries (return every document, like Fuse), patterns longer than 32 characters (chunked like Fuse, slower: no in-wasm combine). `sortFn`, `shouldSort: false` and `minMatchCharLength > 1` also skip the in-wasm combine; `minMatchCharLength` additionally locates the matched fragments of every candidate string in js.
 
 **Deliberate differences:**
 - `ignoreDiacritics` strips `\p{M}`, Fuse uses a fixed list of marks; 73 recently added code points differ.
 - Objects inside array values are ignored (Fuse indexes `"[object Object]"`).
+
+## Changing the collection, indexes
+
+`add(doc)`, `remove(predicate)`, `removeAt(index)`, `setCollection(docs, index?)` and `getIndex()` work like Fuse's, including which arrays are modified: `add` pushes onto the array you passed in, `removeAt` splices it, `remove` keeps a filtered copy. The index (Fuse's format, see below) is updated at once, and the next search flattens it again, which costs about as much as creating the instance. That is fine for a batch of changes, not for adding one document between every two searches.
+
+`Fuseter.createIndex(keys, docs)` and `Fuseter.parseIndex(json)` use Fuse's index format in both directions: an index made by `Fuse.createIndex` (as the object or its parsed JSON) can be loaded here and the other way round. Pass it as `Fuseter.create(docs, options, { index })`. It saves extracting the strings from the documents; the field norms and strings of the index are used as they are (also by `includeMatches` and `sortFn`, so a `getFn` runs once per document and key). The documents must be the ones the index was made from, and, as in Fuse, `add` and `remove` update the index object you passed in. `getIndex()` returns it, or makes one on first use. `Fuseter.config` holds the defaults of new instances (`Fuseter.config.getFn` is Fuse's default getFn, which a custom `getFn` can wrap) and `Fuseter.version` the package version.
 
 ## Match highlighting
 
