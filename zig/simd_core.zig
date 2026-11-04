@@ -362,13 +362,13 @@ pub fn Scan(comptime T: type, comptime L: usize, comptime D: bool, comptime MS: 
             }
         }
 
-        // ---- several short patterns in one state word (standard kernel only, T = u16) ----
-        // Field f of a lane (w = 16 / fields bits wide, pattern of at most w characters) holds the state of pattern f. A shift moves the top bit of a field into
+        // ---- several short patterns in one state word (standard kernel only, T = u32) ----
+        // Field f of a lane (as many bits as the pattern has characters) holds the state of pattern f. A shift moves the top bit of a field into
         // the next one, but every shift is followed by an OR with the field start bits (ones), which overwrites it. Bits above a field's match bit are never read.
 
         fn groupPacked(
             comptime KM: u32, row_base: [*]const u16, table: [*]const T, len_v: V, min_len: u32, max_len: u32,
-            ones: V, masks: *const [4]V, fields: u32, ini: *const [32]T, best: *[4]V,
+            ones: V, masks: *const [MAX_FIELDS]V, fields: u32, ini: *const [32]T, best: *[MAX_FIELDS]V,
         ) void {
             const zero = splat(0);
             var st: [KM + 1]V = undefined;
@@ -412,26 +412,30 @@ pub fn Scan(comptime T: type, comptime L: usize, comptime D: bool, comptime MS: 
             }
         }
 
-        pub const MAX_FIELDS = 4;
+        pub const MAX_FIELDS = 8;
         pub const MAX_PACKED_KMAX = 4;
 
-        // Pattern f (at most 16 / fields characters, kmax at most MS) writes its scores to out + f * n.
+        // Pattern f writes its scores to out + f * n; the patterns are laid out back to back in the state word (their lengths add up to at most
+        // the word size), kmax at most MAX_PACKED_KMAX.
         pub fn runPacked(
             data: [*]const u16, goff: [*]const u32, offs: [*]const u32, order: [*]const u32, n: u32, table: [*]const T,
             fields: u32, pat_lens: [*]const u32, kmaxs: [*]const u32, out: [*]f64,
         ) void {
-            const w: u5 = @intCast(16 / fields);
+            const Shift = if (@bitSizeOf(T) == 16) u4 else u5;
             var masks: [MAX_FIELDS]V = undefined;
+            var starts: [MAX_FIELDS]u32 = undefined;
             var plfs: [MAX_FIELDS]f64 = undefined;
             var ones: T = 0;
             var kmax: u32 = 0;
             var need: u32 = ~@as(u32, 0);
+            var next: u32 = 0;
             var f: u32 = 0;
             while (f < fields) : (f += 1) {
-                const shift: u4 = @intCast(f * w);
-                masks[f] = splat(@as(T, 1) << @intCast(pat_lens[f] - 1 + shift));
+                starts[f] = next;
+                masks[f] = splat(@as(T, 1) << @as(Shift, @intCast(next + pat_lens[f] - 1)));
                 plfs[f] = @floatFromInt(pat_lens[f]);
-                ones |= @as(T, 1) << shift;
+                ones |= @as(T, 1) << @as(Shift, @intCast(next));
+                next += pat_lens[f];
                 kmax = @max(kmax, kmaxs[f]);
                 need = @min(need, pat_lens[f] - kmaxs[f]);
             }
@@ -440,8 +444,8 @@ pub fn Scan(comptime T: type, comptime L: usize, comptime D: bool, comptime MS: 
             while (q <= kmax) : (q += 1) {
                 f = 0;
                 while (f < fields) : (f += 1) {
-                    const bits: u5 = @intCast(@min(q, w));
-                    ini[q] |= @as(T, @intCast(((@as(u32, 1) << bits) - 1) << @intCast(f * w)));
+                    const low: T = @intCast((@as(u32, 1) << @intCast(@min(q, pat_lens[f]))) - 1);
+                    ini[q] |= low << @as(Shift, @intCast(starts[f]));
                 }
             }
             const first = firstGroup(offs, order, n, need);

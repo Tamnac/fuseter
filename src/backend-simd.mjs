@@ -14,7 +14,8 @@ const moduleFor = ({ transposition, weighted }) => modules[weighted ? (transposi
 const UNWEIGHTED = { mask: 0, midWord: 1 };
 const MAX_NORM_CLASSES = 255;   // norm ids are bytes, 255 marks an absent string
 const MAX_TERMS = 8;           // patterns whose scores scanMany keeps
-const MAX_FIELDS = 4;          // patterns packed into one state word
+const PACK_BITS = 16;          // lane width of the packed kernel, the patterns of a pass add up to at most this many characters
+const MAX_FIELDS = 8;          // patterns packed into one state word
 const MAX_PACKED_KMAX = 4;     // error levels the packed kernel is built for
 const MAX_TABLE_STRIDE = 34;    // kmax + 2 columns per (slot, norm class)
 
@@ -68,7 +69,7 @@ export const simdBackend = {
     const { order } = groupByLength(corpus), T4 = transpose(corpus, order, 4), T8 = transpose(corpus, order, 8);
     const many = useTokenSearch && ex.scan_packed ? MAX_TERMS : 0;
     const P = allocate(mem, {
-      mtab: many * 65536 * 2, mlen: many * 4, mk: many * 4, mout: many * n * 8,
+      mtab: many ? 65536 * 2 : 0, mlen: many * 4, mk: many * 4, mout: many * n * 8,
       d4: T4.t.byteLength, s4: T4.flags?.byteLength ?? 0, g4: T4.goff.byteLength, d8: T8.t.byteLength, s8: T8.flags?.byteLength ?? 0, g8: T8.goff.byteLength,
       offs: corpus.offs.byteLength, order: order.byteLength, t32: 65536 * 4, t16: 65536 * 2, out: n * 8,
       normId: nStr, tbl: K * nn * MAX_TABLE_STRIDE * 8, keys: nDocs * 8, ids: nDocs * 4, keys2: nDocs * 8, ids2: nDocs * 4, hist: 8 * 256 * 4, ...tokenSizes(index),
@@ -130,20 +131,21 @@ export const simdBackend = {
       scanMany: many ? plans => {
         for (const c of packed) packTable[c] = 0;
         packed.length = 0;
-        const terms = [...new Map(plans.filter(({ q, kmax }) => q.length <= 8 && kmax <= MAX_PACKED_KMAX).map(plan => [plan.q, plan])).values()].sort((a, b) => a.q.length - b.q.length);
+        const terms = [...new Map(plans.filter(({ q, kmax }) => q.length <= PACK_BITS && kmax <= MAX_PACKED_KMAX).map(plan => [plan.q, plan])).values()].sort((a, b) => a.q.length - b.q.length);
         const groups = [];
         for (const plan of terms) {
           const last = groups.at(-1);
-          if (last && last.length < MAX_FIELDS && (last.length + 1) * plan.q.length <= 16) last.push(plan); else groups.push([plan]);
+          if (last && last.length < MAX_FIELDS && last.chars + plan.q.length <= PACK_BITS) { last.push(plan); last.chars += plan.q.length; }
+          else groups.push(Object.assign([plan], { chars: plan.q.length }));
         }
         const found = new Map();
         let slot = 0;
         for (const group of groups) {
           if (group.length < 2 || slot + group.length > MAX_TERMS) continue;
-          const w = Math.floor(16 / group.length);
+          let start = 0;
           group.forEach(({ q, kmax }, f) => {
-            for (let j = 0; j < q.length; j++) { const c = q.charCodeAt(j); packTable[c] |= 1 << (q.length - j - 1 + f * w); packed.push(c); }
-            packLens[f] = q.length; packKmax[f] = kmax;
+            for (let j = 0; j < q.length; j++) { const c = q.charCodeAt(j); packTable[c] |= 1 << (start + q.length - j - 1); packed.push(c); }
+            packLens[f] = q.length; packKmax[f] = kmax; start += q.length;
           });
           ex.scan_packed(P.d8, P.g8, P.offs, P.order, n, P.mtab, group.length, P.mlen, P.mk, P.mout + slot * n * 8);
           group.forEach(({ q }, f) => found.set(q, new Float64Array(mem.buffer, P.mout + (slot + f) * n * 8, n)));
