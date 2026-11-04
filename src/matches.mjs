@@ -1,5 +1,6 @@
 import { createAligner } from "./align.mjs";
 import { createLocator } from "./kernel-js.mjs";
+import { locatedRanges } from "./located.mjs";
 
 // The string ids grouped by length (ascending, stable): the ids of length l are order[start[l] .. start[l + 1]).
 export function groupByLength({ offs, n, maxLen }) {
@@ -81,7 +82,8 @@ const dropShort = (ranges, minLength) => minLength > 1 ? ranges.filter(([from, t
 // `ranges(s, patLen, start)` returns null when the chunk does not match string `s`, else the (possibly empty) ranges of at least minLength characters.
 // Every non-overlapping error-free occurrence of the pattern is marked, plus every character that occurs in the pattern within [start, start + patLen - 1 + level],
 // where start is the lowest start of a match at the best error level (see createLocator).
-export function createRangeFinder(corpus, { transposition, minLength }) {
+export function createRangeFinder(corpus, { transposition, minLength, located }) {
+  if (located) return locatedRanges(corpus, located);
   const { data, offs } = corpus, locator = createLocator(corpus, transposition), { table } = locator;
   let mask = new Uint8Array(0);
 
@@ -117,9 +119,9 @@ export function createRangeFinder(corpus, { transposition, minLength }) {
 // Computes Fuse's `matches` for result documents. The kernels only produce scores, so this runs after sorting and limiting, only for the documents
 // that are returned (with a `sortFn`, for every hit), in js on every backend. Ranges are those of createRangeFinder; chunks of long patterns are searched
 // one by one and their ranges merged.
-export function createMatcher(index, { slotsOf, transposition, minLength, normalize, original, highlighting }) {
+export function createMatcher(index, { slotsOf, transposition, minLength, normalize, original, highlighting, located }) {
   const { corpus } = index, { data, offs } = corpus;
-  const finder = createRangeFinder(corpus, { transposition, minLength }), aligner = highlighting && createAligner(corpus, transposition);
+  const finder = createRangeFinder(corpus, { transposition, minLength, located }), aligner = highlighting && createAligner(corpus, transposition);
 
   // The experimental ranges: around every alignment, or only the first, as the alignment itself or as Fuse's window of characters.
   function alignedRanges(s, pattern) {
@@ -143,7 +145,7 @@ export function createMatcher(index, { slotsOf, transposition, minLength, normal
   // `plans` are the patterns searched ({ q, chunks, kmax, rule }, see planFor in search.mjs): one, or one per term of a token search, whose ranges are merged.
   return function matchesFor(ids, plans) {
     const perDoc = ids.map(slotsOf);
-    for (const { q, chunks, kmax, rule } of plans) {
+    for (const { q, chunks, kmax, rule, threshold } of plans) {
       if (!q.length) continue;
       const pending = [];
       for (const slots of perDoc) for (const slot of slots) {
@@ -151,7 +153,7 @@ export function createMatcher(index, { slotsOf, transposition, minLength, normal
         else if (q.length >= minLength) slot.ranges.push([0, q.length - 1]);
       }
       for (const { pattern, start } of chunks) {
-        if (highlighting) aligner.prep(pattern, kmax, rule); else finder.prep(pattern, kmax, rule);
+        if (highlighting) aligner.prep(pattern, kmax, rule); else finder.prep(pattern, kmax, rule, threshold);
         for (const slot of pending) {
           const found = highlighting ? alignedRanges(slot.s, pattern) : finder.ranges(slot.s, pattern.length, start);
           if (found) slot.ranges.push(...found);

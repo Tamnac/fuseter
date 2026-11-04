@@ -70,7 +70,7 @@ export function compare(got, want) {
   return null;
 }
 
-export const fuseFor = (docs, options) => new Fuse(docs, { ...options, ignoreLocation: true, includeScore: true });
+export const fuseFor = (docs, options) => new Fuse(docs, { ignoreLocation: true, ...options, includeScore: true });
 
 // Plain O(m*n) approximate substring match: fewest edits between the pattern and any substring of the text
 // (with `prefix`: any prefix of the text). With `transposed`, swapping two adjacent characters is one edit (optimal string alignment distance).

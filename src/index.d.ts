@@ -71,12 +71,17 @@ export interface FuseterOptions {
   tokenize?: RegExp | ((text: string) => string[]);
   /** With "all" a document only matches when its strings together match every term. Default "any". */
   tokenMatch?: "any" | "all";
-  /** Accepted, no effect while ignoreLocation is on. */
+  /** Scan the whole text instead of a window around `location`. No effect while ignoreLocation is on. */
   findAllMatches?: boolean;
-  /** Only `true` is supported (this is the default here, unlike Fuse). */
-  ignoreLocation?: true;
-  /** Accepted, no effect while ignoreLocation is on. */
+  /**
+   * Default true (unlike Fuse): a match scores the same wherever it is in the text. With false, Fuse's location scoring applies: errors / pattern length plus
+   * the distance of the match from `location` over `distance`. Slower with a high threshold (see the README); not available with `typing` or `highlighting`.
+   * Token search always ignores the location, as in Fuse.
+   */
+  ignoreLocation?: boolean;
+  /** Where in the text a match is expected, an integer (chunks of patterns over 32 characters are expected further on). Default 0. Only used with ignoreLocation: false. */
   location?: number;
+  /** How far from `location` a match may be before it cannot score within the threshold: a match this many characters away scores 1 more. Default 100. Only used with ignoreLocation: false. */
   distance?: number;
 }
 

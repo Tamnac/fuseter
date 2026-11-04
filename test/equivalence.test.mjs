@@ -131,6 +131,65 @@ describe("includeMatches matches Fuse", () => {
   });
 });
 
+describe("ignoreLocation: false matches Fuse", () => {
+  const LOCATED = { ignoreLocation: false };
+  const queries = (r, docs, count) => randomQueries(r, stringsOf(docs, ["title", "author"]), count);
+
+  test("defaults (location 0, distance 100)", async () => {
+    const r = rng(71), docs = randomDocs(r, 250);
+    await check(docs, { keys: KEYS, ...LOCATED }, queries(r, docs, 40));
+  });
+
+  for (const [location, distance] of [[0, 10], [5, 30], [20, 1000], [100, 100], [3, 0], [-4, 50]]) {
+    test(`location ${location}, distance ${distance}`, async () => {
+      const r = rng(72 + location + distance), docs = randomDocs(r, 200);
+      await check(docs, { keys: ["title", "tags", ["meta", "note"]], ...LOCATED, location, distance }, queries(r, docs, 30), { thresholds: [0.1, 0.3, 0.6, 1] });
+    });
+  }
+
+  test("findAllMatches", async () => {
+    const r = rng(73), docs = randomDocs(r, 250);
+    await check(docs, { keys: KEYS, ...LOCATED, findAllMatches: true, distance: 20 }, queries(r, docs, 30), { thresholds: [0.2, 0.5, 0.8] });
+  });
+
+  test("string collection, long texts", async () => {
+    const r = rng(74), docs = Array.from({ length: 200 }, () => randomText(r, 0, 25));
+    await check(docs, { ...LOCATED, distance: 60 }, randomQueries(r, docs, 40), { thresholds: [0.2, 0.5, 0.9] });
+  });
+
+  test("no field norm, isCaseSensitive, ignoreDiacritics", async () => {
+    const r = rng(75), docs = randomDocs(r, 250);
+    await check(docs, { keys: KEYS, ...LOCATED, ignoreFieldNorm: true, isCaseSensitive: true, location: 4 }, queries(r, docs, 25), { thresholds: [0.2, 0.5] });
+    await check(docs, { keys: KEYS, ...LOCATED, ignoreDiacritics: true }, ["naivé", "Cafe", "ORSTED", "lodz", ...queries(r, docs, 25)], { thresholds: [0.2, 0.5] });
+  });
+
+  test("includeMatches", async () => {
+    const r = rng(76), docs = randomDocs(r, 250);
+    await check(docs, { keys: ["title", "tags", ["meta", "note"]], ...LOCATED, includeMatches: true, location: 6, distance: 40 }, queries(r, docs, 35), { thresholds: [0.2, 0.5, 0.8] });
+    const strings = Array.from({ length: 250 }, () => randomText(r, 0, 12));
+    await check(strings, { ...LOCATED, includeMatches: true }, randomQueries(r, strings, 35), { thresholds: [0.3, 0.7] });
+  });
+
+  for (const minMatchCharLength of [2, 4]) {
+    test(`minMatchCharLength ${minMatchCharLength}`, async () => {
+      const r = rng(77 + minMatchCharLength), docs = randomDocs(r, 250);
+      await check(docs, { keys: KEYS, ...LOCATED, minMatchCharLength }, queries(r, docs, 35), { thresholds: [0.1, 0.3, 0.6] });
+      await check(docs, { keys: ["title", "tags"], ...LOCATED, minMatchCharLength, includeMatches: true, location: 2 }, queries(r, docs, 35), { thresholds: [0.1, 0.3, 0.6] });
+    });
+  }
+
+  test("sortFn, shouldSort: false", async () => {
+    const r = rng(79), docs = randomDocs(r, 250);
+    await check(docs, { keys: KEYS, ...LOCATED, sortFn: (a, b) => b.score - a.score, includeMatches: true }, queries(r, docs, 20), { thresholds: [0.3, 0.7] });
+    await check(docs, { keys: KEYS, ...LOCATED, shouldSort: false }, queries(r, docs, 20), { thresholds: [0.3, 0.7], limits: [undefined, 3] });
+  });
+
+  test("token search keeps ignoreLocation on for its terms", async () => {
+    const r = rng(80), docs = randomDocs(r, 250);
+    await check(docs, { keys: KEYS, ...LOCATED, useTokenSearch: true, location: 10 }, [...queries(r, docs, 20), "lord rings", "wen co"], { thresholds: [0.3, 0.6] });
+  });
+});
+
 describe("limit and query handling", () => {
   test("limit follows Fuse", async () => {
     const docs = randomDocs(rng(21), 100), fuse = fuseFor(docs, { keys: ["title"] });

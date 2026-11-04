@@ -11,15 +11,18 @@ const TIERS = ["simd", "wasm", "js"];   // fastest first
 const FALLBACKS = ["js", "wasm", "throw"];
 const INDICES_IN = ["normalized", "original"];
 
-// The defaults of new instances (Fuseter.config). Location, distance and findAllMatches are accepted for compatibility, they have no effect while
-// ignoreLocation is on (Fuse only widens the window of text it scans, which is the whole text anyway).
+// The defaults of new instances (Fuseter.config). Unlike Fuse, ignoreLocation is on by default: location, distance and findAllMatches have no effect
+// while it is on (Fuse only widens the window of text it scans, which is the whole text anyway).
 const CONFIG = {
   keys: [], threshold: 0.6, includeScore: false, includeMatches: false, indicesIn: "normalized", highlighting: null, isCaseSensitive: false, ignoreDiacritics: false,
   ignoreFieldNorm: false, fieldNormWeight: 1, shouldSort: true, sortFn: defaultSortFn, minMatchCharLength: 1, getFn: defaultGetFn,
   location: 0, distance: 100, findAllMatches: false, ignoreLocation: true, useExtendedSearch: false, useTokenSearch: false, tokenize: undefined, tokenMatch: "any",
   typing: null,   // opt-in heuristics, not Fuse compatible (see typing.mjs)
 };
-const UNSUPPORTED = { useExtendedSearch: false, ignoreLocation: true };
+const UNSUPPORTED = { useExtendedSearch: false };
+
+// Token search keeps ignoreLocation on for its terms, as Fuse does.
+const needsLocated = ({ ignoreLocation, useTokenSearch }) => !ignoreLocation && !useTokenSearch;
 
 function resolveOptions(options) {
   for (const name of Object.keys(options)) if (!(name in CONFIG)) throw new TypeError(`fuseter: unknown option '${name}'`);
@@ -31,6 +34,8 @@ function resolveOptions(options) {
   if (!TOKEN_MATCH.includes(resolved.tokenMatch)) throw new TypeError(`fuseter: tokenMatch must be one of ${TOKEN_MATCH.join(", ")}`);
   if (!INDICES_IN.includes(resolved.indicesIn)) throw new TypeError(`fuseter: indicesIn must be one of ${INDICES_IN.join(", ")}`);
   if (resolveHighlighting(resolved.highlighting) && !resolved.includeMatches) throw new TypeError("fuseter: 'highlighting' needs includeMatches");
+  if (!Number.isInteger(resolved.location) || !(resolved.distance >= 0)) throw new TypeError("fuseter: location must be an integer and distance a non-negative number");
+  if (!resolved.ignoreLocation && (resolved.typing || resolved.highlighting)) throw new TypeError("fuseter: 'typing' and 'highlighting' need ignoreLocation: true");
   return resolved;
 }
 
@@ -44,7 +49,8 @@ export function defineFuseter(backends, defaultBackend) {
   }
 
   return class Fuseter {
-    // Rank-equivalent drop-in for `new Fuse(docs, { ...options, ignoreLocation: true }).search(query, { limit })`.
+    // Rank-equivalent drop-in for `new Fuse(docs, options).search(query, { limit })` (ignoreLocation defaults to true here, false in Fuse).
+    // With `typing` or `highlighting` the results no longer match Fuse's.
     // runtime: { backend: 'simd' | 'wasm' | 'js', fallback: 'js' (default) | 'wasm' | 'throw', index: a prebuilt index (createIndex, parseIndex) }
     static async create(docs, options = {}, { backend = defaultBackend, fallback = "js", index } = {}) {
       const candidates = plan(backend, fallback), failures = [];
@@ -120,12 +126,12 @@ export function defineFuseter(backends, defaultBackend) {
     _rebuild() {
       const o = this.options, docs = this._docs;
       const index = buildIndex(docs, { ...o, starts: Boolean(this._typing.firstLetter) }, this._index);
-      const failures = [...this._failures];
+      const failures = [...this._failures], located = needsLocated(o) ? o : null;
       for (const tier of this._candidates) {
         if (failures.some(([t]) => t === tier)) continue;
         try {
           const scanner = backends[tier].create(index, { ignoreFieldNorm: o.ignoreFieldNorm, transposition: this._typing.transposition, useTokenSearch: o.useTokenSearch });
-          const searcher = createSearcher(index, scanner, { ...o, highlighting: resolveHighlighting(o.highlighting), typing: this._typing, normalize: textNormalizer(o) });
+          const searcher = createSearcher(index, scanner, { ...o, located, highlighting: resolveHighlighting(o.highlighting), typing: this._typing, normalize: textNormalizer(o) });
           this._search = searcher.search;
           this.timings = searcher.timings;
           this.backend = tier;

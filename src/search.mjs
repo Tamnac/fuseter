@@ -1,5 +1,6 @@
 import { kmaxFor } from "./kernel-js.mjs";
 import { subRecord } from "./fuse-index.mjs";
+import { locateInPlace } from "./located.mjs";
 import { createMatcher, createRangeFinder, createSlotReader, equalsPattern, groupByLength } from "./matches.mjs";
 import { createTokenizer, documentFrequencies, idfOf } from "./tokens.mjs";
 import { weightRule } from "./typing.mjs";
@@ -26,7 +27,7 @@ const fuseMatch = ({ indices, value, keyDef, refIndex }) => {
   return match;
 };
 
-export function createSearcher(index, scanner, { threshold: defaultThreshold, ignoreFieldNorm, includeScore, includeMatches, indicesIn, highlighting, normalize, typing, shouldSort, sortFn: givenSortFn, minMatchCharLength: minLength, useTokenSearch, tokenize, tokenMatch }) {
+export function createSearcher(index, scanner, { threshold: defaultThreshold, ignoreFieldNorm, includeScore, includeMatches, indicesIn, highlighting, normalize, typing, shouldSort, sortFn: givenSortFn, minMatchCharLength: minLength, located, useTokenSearch, tokenize, tokenMatch }) {
   const { docs, K, nDocs, weights, norms, present, keyless, keys, corpus } = index;
   const exactScore = keyless ? 0 : Number.EPSILON;
   const sortFn = shouldSort && givenSortFn !== defaultSortFn ? givenSortFn : null;
@@ -37,10 +38,11 @@ export function createSearcher(index, scanner, { threshold: defaultThreshold, ig
   let frequencies = null;   // token search only
   const tokenizer = useTokenSearch ? createTokenizer(tokenize, normalize) : null;
   const slotsOf = createSlotReader(index), transposition = typing.transposition;
-  const matcher = includeMatches ? createMatcher(index, { slotsOf, transposition, minLength, normalize, original: indicesIn === "original", highlighting }) : null;
-  const finder = minLength > 1 ? createRangeFinder(corpus, { transposition, minLength }) : null;
+  const locate = located && locateInPlace(corpus, located, scanner.out);
+  const matcher = includeMatches ? createMatcher(index, { slotsOf, transposition, minLength, normalize, original: indicesIn === "original", highlighting, located }) : null;
+  const finder = minLength > 1 && !located ? createRangeFinder(corpus, { transposition, minLength }) : null;
   const keyObjects = sortFn ? new Map(keys.map((def, position) => [def, { position, key: { path: def.path, id: def.id, weight: weights[def.base], src: def.src, getFn: def.getFn } }])) : null;
-  const simpleRanking = shouldSort && !sortFn && !finder;   // what the in-wasm combine step can do
+  const simpleRanking = shouldSort && !sortFn && !finder && !located;   // what the in-wasm combine step can do
   const timings = { scan: 0, combine: 0, format: 0 };
 
   // With minMatchCharLength, a string whose match is only in fragments shorter than that is no match (except when it equals the query, see settle).
@@ -48,13 +50,18 @@ export function createSearcher(index, scanner, { threshold: defaultThreshold, ig
 
   // Chunk scores are summed per string like Fuse does (a chunk without a match counts 1, one that is dropped for its fragments counts its score);
   // -1 marks strings no chunk matched.
-  function scanChunks(chunks, kmax, q) {
+  function scanChunks({ q, chunks, kmax, threshold }) {
     merged ??= new Float64Array(corpus.n); matched ??= new Uint8Array(corpus.n);
     merged.fill(0); matched.fill(0);
     for (const chunk of chunks) {
       scanner.prep(chunk.pattern);
       const out = scanner.scan(MAX_BITS, kmax);
       finder?.prep(chunk.pattern, kmax, null);
+      if (located) {
+        locate(chunk.pattern, threshold, chunk.start, true);   // a chunk that does not match counts the score of its best candidate, as a negative
+        for (let s = 0; s < corpus.n; s++) if (out[s] > 0) { merged[s] += out[s]; matched[s] = 1; } else merged[s] -= out[s];
+        continue;
+      }
       for (let s = 0; s < corpus.n; s++) {
         const v = out[s];
         if (v < 0) merged[s] += 1; else { merged[s] += v; if (!finder || !fragmentsTooShort(s, chunk, q)) matched[s] = 1; }
@@ -70,7 +77,7 @@ export function createSearcher(index, scanner, { threshold: defaultThreshold, ig
     // The weighted rule only applies to single-chunk patterns: chunks after the first have no first letter.
     const rule = typing.firstLetter && chunks.length === 1 ? weightRule(q, typing.firstLetter) : null;
     const denom = rule?.denom ?? Math.min(q.length, MAX_BITS);
-    return { q, chunks, rule, denom, kmax: kmaxFor(Math.min(q.length, MAX_BITS), threshold, denom) };
+    return { q, chunks, rule, denom, threshold, kmax: kmaxFor(Math.min(q.length, MAX_BITS), threshold, denom) };
   }
 
   // Applies minMatchCharLength to the scores of a single pattern (chunked ones are handled in scanChunks).
@@ -87,17 +94,19 @@ export function createSearcher(index, scanner, { threshold: defaultThreshold, ig
     const { start, order } = byLength;
     for (let i = start[q.length]; i < start[q.length + 1]; i++) {
       const s = order[i];
-      if (scores[s] >= 0 && equalsPattern(corpus, s, q)) scores[s] = q.length >= minLength ? 0 : -1;
+      if (equalsPattern(corpus, s, q)) scores[s] = q.length >= minLength ? 0 : -1;
     }
   }
 
   // The score of every string for one pattern (-1: no match); the array is reused by the next call.
-  function patternScores({ q, chunks, kmax, rule }) {
+  function patternScores(plan) {
+    const { q, chunks, kmax, rule, threshold } = plan;
     let scores;
-    if (chunks.length > 1) scores = scanChunks(chunks, kmax, q);
+    if (chunks.length > 1) scores = scanChunks(plan);
     else {
       scanner.prep(q); scores = scanner.scan(q.length, kmax, rule);
-      if (finder) dropShortMatches(scores, q, q, kmax, rule);
+      if (located) locate(q, threshold, 0, false);
+      else if (finder) dropShortMatches(scores, q, q, kmax, rule);
     }
     settleExact(scores, q);
     return scores;

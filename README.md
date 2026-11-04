@@ -2,6 +2,8 @@
 
 Fuseter is a replacement for [Fuse.js](https://github.com/krisk/fuse) that is significantly faster and comes with some heuristics for improved scoring. Full parity is a WIP.
 
+Fuse's location scoring (`ignoreLocation: false`, `location`, `distance`, `findAllMatches`) is supported and matches Fuse exactly, see [Location scoring](#location-scoring). It is off by default here because it is slower.
+
 Fuseter is 10-40x faster with the plain js tier and 100-300x faster with the simd tier.
 
 ESM only; `require()` works on Node 20.19+ and 22.12+.
@@ -27,9 +29,9 @@ The same measurements without Fuse, using a linear scale to better see differenc
 
 | tier | needs | download (gzip) | search, 10K docs, threshold 0.3 |
 |---|---|---|---|
-| `simd` | WebAssembly SIMD (all current browsers and Node) | 31.2 KB | 0.4-0.7 ms |
-| `wasm` | WebAssembly | 15.9 KB | 2-3 ms |
-| `js` | nothing | 11.6 KB | 4-5 ms |
+| `simd` | WebAssembly SIMD (all current browsers and Node) | 32.2 KB | 0.4-0.7 ms |
+| `wasm` | WebAssembly | 16.9 KB | 2-3 ms |
+| `js` | nothing | 12.6 KB | 4-5 ms |
 | Fuse 7.5 | nothing | | 40-200 ms |
 
 Download sizes are the entry point minified with esbuild and gzipped; the simd entry includes the base64 wasm module (about 4/3 of its raw size).
@@ -46,15 +48,25 @@ To see what you end up with, check `ff.backend` and `ff.fallbackReason`.
 ## Differences from Fuse
 
 **Will be fixed in later versions:**
-- `ignoreLocation` is always on (and is the default here). `location`, `distance` and `findAllMatches` are accepted and ignored (with `ignoreLocation`, `findAllMatches` changes nothing in Fuse either).
 - Not supported, rejected with a `TypeError`: `useExtendedSearch`, unknown options, non-string queries.
 - Not provided: `Fuse.match`, `Fuse.parseQuery`, `Fuse.use`.
 
-**Supported:** string collections, `keys` (names, dotted paths, path arrays, weights), array values (each element is a separate string like in Fuse, at most 64 strings per document), numbers and booleans as text, `threshold` (also per search), `limit`, `shouldSort`, `sortFn`, `getFn` (also per key), `minMatchCharLength`, `includeScore`, `includeMatches` (see below), `isCaseSensitive`, `ignoreDiacritics`, `useTokenSearch` with `tokenize` and `tokenMatch` (see below), `ignoreFieldNorm`, `fieldNormWeight`, blank queries (return every document, like Fuse), patterns longer than 32 characters (chunked like Fuse, slower: no in-wasm combine). `sortFn`, `shouldSort: false` and `minMatchCharLength > 1` also skip the in-wasm combine; `minMatchCharLength` additionally locates the matched fragments of every candidate string in js.
+**Supported:** `ignoreLocation`, `location`, `distance` and `findAllMatches` (see [Location scoring](#location-scoring)), string collections, `keys` (names, dotted paths, path arrays, weights), array values (each element is a separate string like in Fuse, at most 64 strings per document), numbers and booleans as text, `threshold` (also per search), `limit`, `shouldSort`, `sortFn`, `getFn` (also per key), `minMatchCharLength`, `includeScore`, `includeMatches` (see below), `isCaseSensitive`, `ignoreDiacritics`, `useTokenSearch` with `tokenize` and `tokenMatch` (see below), `ignoreFieldNorm`, `fieldNormWeight`, blank queries (return every document, like Fuse), patterns longer than 32 characters (chunked like Fuse, slower: no in-wasm combine). `sortFn`, `shouldSort: false` and `minMatchCharLength > 1` also skip the in-wasm combine; `minMatchCharLength` additionally locates the matched fragments of every candidate string in js.
 
 **Deliberate differences:**
+- `ignoreLocation` defaults to `true` (Fuse: `false`), because location scoring is slower. Pass `ignoreLocation: false` for Fuse's default behaviour.
 - `ignoreDiacritics` strips `\p{M}`, Fuse uses a fixed list of marks; 73 recently added code points differ.
 - Objects inside array values are ignored (Fuse indexes `"[object Object]"`).
+
+## Location scoring
+
+`ignoreLocation: false` scores like Fuse's default: a match costs its errors / pattern length plus its distance from `location` divided by `distance`, and only the text within that distance is searched. `location` must be an integer, a pattern over 32 characters expects each chunk further along, and `findAllMatches` widens the searched text as in Fuse. Scores, order, `includeMatches` and `minMatchCharLength` are identical to Fuse's on every backend.
+
+```js
+const ff = await Fuseter.create(books, { keys: ["title"], ignoreLocation: false, location: 0, distance: 100 });
+```
+
+The plain scan first finds the strings that match anywhere within the threshold, and only those are scored the way Fuse does, in js (`src/located.mjs`, on every tier), because the window and the threshold depend on the matches found so far. The cost therefore depends on how many strings pass the threshold: on 10K books a simd search takes 0.05 ms longer at threshold 0.3 (a few hits) and 5-6 ms longer at 0.6 (1.3-1.9K hits), see `scripts/bench-location.mjs`. The js code adds about 1 KB (gzip) to every entry point, the wasm modules do not change. `typing` and `highlighting` are not available with it, token search ignores the location for its terms like Fuse does.
 
 ## Changing the collection, indexes
 
@@ -122,4 +134,4 @@ Cost on 10K books: `transposition` makes searches 20-25% slower, `firstLetter` r
 - `npm install`, then `npm test`: runs the equivalence suite (random corpora, all tiers, thresholds 0-1, limits, every supported option, forced fallbacks) against the Fuse 7.5 dev dependency. Takes about a minute.
 - `npm run build:wasm` rebuilds `wasm/*.wasm` and the embedded `src/wasm/*.mjs` from `zig/` (needs zig 0.17; the generated `src/wasm/*.mjs` are committed and CI fails if a rebuild changes them).
 - `node scripts/browser-check.mjs [chromium] [firefox] [webkit]` bundles the library with esbuild (code splitting) and runs the Fuse comparison, the typing options and the fallback logic in real browsers, once normally and once under a CSP that blocks wasm. Setup: `npm i --no-save playwright esbuild && npx playwright install chromium firefox`. Last run: Chromium 156 and Firefox 157 pass; Safari is untested.
-- `node scripts/bench.mjs [books.json] [--fuse] [--json=file]` prints a timing table (`--json` saves it, `node scripts/chart.mjs` turns it into the charts in `docs/`); `node scripts/bench-typing.mjs [books.json]` compares the typing heuristics with the standard kernels, and `node scripts/bench-tokens.mjs [books.json]` compares token search with plain search and Fuse's token search (`FUSE=0` skips Fuse).
+- `node scripts/bench.mjs [books.json] [--fuse] [--json=file]` prints a timing table (`--json` saves it, `node scripts/chart.mjs` turns it into the charts in `docs/`); `node scripts/bench-typing.mjs [books.json]` compares the typing heuristics with the standard kernels, and `node scripts/bench-tokens.mjs [books.json]` compares token search with plain search and Fuse's token search, and `node scripts/bench-location.mjs [books.json]` compares `ignoreLocation: false` with `true` (`FUSE=0` skips Fuse in both).
