@@ -1,6 +1,7 @@
 import { kmaxFor } from "./kernel-js.mjs";
 import { subRecord } from "./fuse-index.mjs";
-import { createMatcher, createRangeFinder, createSlotReader, equalsPattern } from "./matches.mjs";
+import { createMatcher, createRangeFinder, createSlotReader, equalsPattern, groupByLength } from "./matches.mjs";
+import { createTokenizer, documentFrequencies, idfOf } from "./tokens.mjs";
 import { weightRule } from "./typing.mjs";
 
 const MAX_BITS = 32;
@@ -25,12 +26,16 @@ const fuseMatch = ({ indices, value, keyDef, refIndex }) => {
   return match;
 };
 
-export function createSearcher(index, scanner, { threshold: defaultThreshold, ignoreFieldNorm, includeScore, includeMatches, indicesIn, highlighting, normalize, typing, shouldSort, sortFn: givenSortFn, minMatchCharLength: minLength }) {
+export function createSearcher(index, scanner, { threshold: defaultThreshold, ignoreFieldNorm, includeScore, includeMatches, indicesIn, highlighting, normalize, typing, shouldSort, sortFn: givenSortFn, minMatchCharLength: minLength, useTokenSearch, tokenize, tokenMatch }) {
   const { docs, K, nDocs, weights, norms, present, keyless, keys, corpus } = index;
   const exactScore = keyless ? 0 : Number.EPSILON;
-  const docScore = new Float64Array(nDocs), hitIds = new Int32Array(nDocs);
-  let merged = null, matched = null;   // chunked patterns only
   const sortFn = shouldSort && givenSortFn !== defaultSortFn ? givenSortFn : null;
+  const ranked = shouldSort && !sortFn && scanner.sortHits;   // the scanner sorts the hits by position
+  const docScore = new Float64Array(nDocs), hitIds = ranked ? scanner.hitIds : new Int32Array(nDocs), hitScores = ranked ? scanner.hitScores : null;
+  let merged = null, matched = null;   // chunked patterns only
+  let byLength = null;
+  let frequencies = null;   // token search only
+  const tokenizer = useTokenSearch ? createTokenizer(tokenize, normalize) : null;
   const slotsOf = createSlotReader(index), transposition = typing.transposition;
   const matcher = includeMatches ? createMatcher(index, { slotsOf, transposition, minLength, normalize, original: indicesIn === "original", highlighting }) : null;
   const finder = minLength > 1 ? createRangeFinder(corpus, { transposition, minLength }) : null;
@@ -59,6 +64,15 @@ export function createSearcher(index, scanner, { threshold: defaultThreshold, ig
     return merged;
   }
 
+  // The pattern as it is searched: its chunks, the typing rule and the largest error level that stays within the threshold.
+  function planFor(q, threshold) {
+    const chunks = chunksOf(q);
+    // The weighted rule only applies to single-chunk patterns: chunks after the first have no first letter.
+    const rule = typing.firstLetter && chunks.length === 1 ? weightRule(q, typing.firstLetter) : null;
+    const denom = rule?.denom ?? Math.min(q.length, MAX_BITS);
+    return { q, chunks, rule, denom, kmax: kmaxFor(Math.min(q.length, MAX_BITS), threshold, denom) };
+  }
+
   // Applies minMatchCharLength to the scores of a single pattern (chunked ones are handled in scanChunks).
   function dropShortMatches(scores, pattern, q, kmax, rule) {
     finder.prep(pattern, kmax, rule);
@@ -68,7 +82,48 @@ export function createSearcher(index, scanner, { threshold: defaultThreshold, ig
 
   // A string equal to the query scores 0 (and matches whatever its length, unless it is shorter than minMatchCharLength).
   function settleExact(scores, q) {
-    for (let s = 0; s < corpus.n; s++) if (scores[s] >= 0 && equalsPattern(corpus, s, q)) scores[s] = q.length >= minLength ? 0 : -1;
+    byLength ??= groupByLength(corpus);
+    if (q.length >= byLength.start.length - 1) return;
+    const { start, order } = byLength;
+    for (let i = start[q.length]; i < start[q.length + 1]; i++) {
+      const s = order[i];
+      if (scores[s] >= 0 && equalsPattern(corpus, s, q)) scores[s] = q.length >= minLength ? 0 : -1;
+    }
+  }
+
+  // The score of every string for one pattern (-1: no match); the array is reused by the next call.
+  function patternScores({ q, chunks, kmax, rule }) {
+    let scores;
+    if (chunks.length > 1) scores = scanChunks(chunks, kmax, q);
+    else {
+      scanner.prep(q); scores = scanner.scan(q.length, kmax, rule);
+      if (finder) dropShortMatches(scores, q, q, kmax, rule);
+    }
+    settleExact(scores, q);
+    return scores;
+  }
+
+  // One plan per term of the query, with the idf weight Fuse gives the term (rarer terms count more).
+  function tokenPlans(query, threshold) {
+    frequencies ??= documentFrequencies(index, tokenizer);
+    return tokenizer(query).map(term => ({ ...planFor(normalize(term), threshold), idf: idfOf(frequencies, term) }));
+  }
+
+  // Fuse's token score of every string: the idf-weighted mean of the terms' scores, 1 - sum(idf * (1 - score)) / sum(idf), over the terms that match
+  // (-1 when none does). With tokenMatch "all", the documents whose strings together miss a term are dropped.
+  function tokenScores(plans) {
+    const requireAll = tokenMatch === "all", { tokens } = scanner;
+    tokens.begin();
+    let maxScore = 0;
+    for (const plan of plans) {
+      maxScore += plan.idf;
+      if (!plan.q.length) continue;
+      const scores = patternScores(plan);
+      if (scores !== scanner.out) scanner.out.set(scores);
+      tokens.add(scanner.out, plan.idf);
+      if (requireAll) tokens.cover(scanner.out);
+    }
+    return tokens.finish(maxScore, requireAll ? plans.length : 0);
   }
 
   // Scores every document that matched in at least one slot and returns the hit count; ids/scores land in hitIds/docScore.
@@ -83,7 +138,7 @@ export function createSearcher(index, scanner, { threshold: defaultThreshold, ig
         any = true;
         total *= Math.pow(v === 0 ? exactScore : v, weights[k] * (ignoreFieldNorm ? 1 : norms[s]));
       }
-      if (any) { docScore[d] = total; hitIds[m++] = d; }
+      if (any) { docScore[d] = total; if (hitScores) hitScores[m] = total; hitIds[m++] = d; }
     }
     return m;
   }
@@ -124,8 +179,8 @@ export function createSearcher(index, scanner, { threshold: defaultThreshold, ig
   }
 
   // With a sortFn, the hits are sorted as Fuse's result records (the order of ties is by document), then cut to the limit.
-  function sortCustom(m, scores, cap, q, chunks, kmax, rule) {
-    const ids = Array.from(hitIds.subarray(0, m)), found = matcher?.(ids, q, chunks, kmax, rule);
+  function sortCustom(m, scores, cap, plans) {
+    const ids = Array.from(hitIds.subarray(0, m)), found = matcher?.(ids, plans);
     const results = ids.map((d, i) => {
       const slots = slotsOf(d);
       const matches = slots.filter(slot => scores[slot.s] >= 0).map(({ s, keyDef, value, refIndex }) => {
@@ -155,17 +210,14 @@ export function createSearcher(index, scanner, { threshold: defaultThreshold, ig
       return typeof limit === "number" && limit > -1 ? all.slice(0, limit) : all;
     }
     const cap = typeof limit === "number" && limit > 0 ? Math.ceil(limit) : limit === 0 ? 0 : -1;
-    const q = normalize(query);
-    if (cap === 0 || q.length === 0) return [];
-    const chunks = chunksOf(q);
-    // The weighted rule only applies to single-chunk patterns: chunks after the first have no first letter.
-    const rule = typing.firstLetter && chunks.length === 1 ? weightRule(q, typing.firstLetter) : null;
-    const denom = rule?.denom ?? Math.min(q.length, MAX_BITS);
-    const kmax = kmaxFor(Math.min(q.length, MAX_BITS), threshold, denom);
+    if (cap === 0) return [];
+    const plans = useTokenSearch ? tokenPlans(query, threshold) : [planFor(normalize(query), threshold)];
+    if (useTokenSearch ? !plans.length : !plans[0].q.length) return [];
+    const [{ q, chunks, kmax, rule, denom }] = plans;
     let t0 = performance.now(), t1, t2, res;
 
     let custom = false;
-    if (chunks.length === 1 && scanner.combineSort && simpleRanking) {
+    if (!useTokenSearch && chunks.length === 1 && scanner.combineSort && simpleRanking) {
       scanner.prep(q); scanner.scan(q.length, kmax, rule);
       t1 = performance.now();
       const { hits, ids, scores } = scanner.combineSort(q.length, denom, kmax, cap > 0 && cap < nDocs ? cap : 0);
@@ -174,24 +226,25 @@ export function createSearcher(index, scanner, { threshold: defaultThreshold, ig
       res = new Array(count);
       for (let i = 0; i < count; i++) res[i] = result(ids[i], scores[i]);
     } else {
-      let scores;
-      if (chunks.length > 1) scores = scanChunks(chunks, kmax, q);
-      else {
-        scanner.prep(q); scores = scanner.scan(q.length, kmax, rule);
-        if (finder) dropShortMatches(scores, q, q, kmax, rule);
-      }
-      settleExact(scores, q);
+      const scores = useTokenSearch ? tokenScores(plans) : patternScores(plans[0]);
       t1 = performance.now();
       const m = combine(scores);
-      if (sortFn) { custom = true; res = sortCustom(m, scores, cap, q, chunks, kmax, rule); t2 = t1; }
-      else {
+      if (sortFn) { custom = true; res = sortCustom(m, scores, cap, plans); t2 = t1; }
+      else if (ranked) {
+        const { ids, scores: keys } = scanner.sortHits(m, cap > 0 && cap < nDocs ? cap : 0);
+        const count = cap > 0 && m > cap ? cap : m;
+        t2 = performance.now();
+        res = new Array(count);
+        for (let i = 0; i < count; i++) res[i] = result(ids[i], keys[i]);
+      } else {
         const ids = shouldSort ? order(m, cap) : hitIds.subarray(0, typeof limit === "number" && limit > -1 ? Math.min(m, Math.trunc(limit)) : m);
         t2 = performance.now();
-        res = Array.from(ids, d => result(d, docScore[d]));
+        res = new Array(ids.length);
+        for (let i = 0; i < ids.length; i++) res[i] = result(ids[i], docScore[ids[i]]);
       }
     }
     if (matcher && !custom) {
-      const matches = matcher(res.map(r => r.refIndex), q, chunks, kmax, rule);
+      const matches = matcher(res.map(r => r.refIndex), plans);
       for (let i = 0; i < res.length; i++) res[i].matches = matches[i].map(fuseMatch);
     }
     timings.scan = t1 - t0; timings.combine = t2 - t1; timings.format = performance.now() - t2;

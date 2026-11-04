@@ -1,4 +1,5 @@
-import { lazyModule, allocate, simdSupported } from "./wasm-util.mjs";
+import { lazyModule, allocate, simdSupported, tokenSizes, wasmTokenAccumulator } from "./wasm-util.mjs";
+import { groupByLength } from "./matches.mjs";
 import simdBase64 from "./wasm/simd.mjs";
 
 // The typing options need other kernels: each combination is a module fetched only when used (transposition +4.5 KB raw, weighted first letter
@@ -13,16 +14,6 @@ const moduleFor = ({ transposition, weighted }) => modules[weighted ? (transposi
 const UNWEIGHTED = { mask: 0, midWord: 1 };
 const MAX_NORM_CLASSES = 255;   // norm ids are bytes, 255 marks an absent string
 const MAX_TABLE_STRIDE = 34;    // kmax + 2 columns per (slot, norm class)
-
-// Strings sorted by length (stable), so lanes of a group have equal length.
-function sortByLength({ offs, n, maxLen }) {
-  const start = new Uint32Array(maxLen + 2);
-  for (let s = 0; s < n; s++) start[offs[s + 1] - offs[s] + 1]++;
-  for (let l = 1; l < start.length; l++) start[l] += start[l - 1];
-  const order = new Uint32Array(n);
-  for (let s = 0; s < n; s++) order[start[offs[s + 1] - offs[s]]++] = s;
-  return order;
-}
 
 // Groups of L strings stored transposed ([position][lane]) in reversed text order; the word-start flags (if any) get the same layout.
 function transpose({ data, offs, n, starts }, order, L) {
@@ -71,11 +62,11 @@ export const simdBackend = {
     const { corpus, K, nDocs, weights, keyless } = index, n = corpus.n, nStr = index.nStr, weighted = Boolean(corpus.starts);
     const { exports: ex } = moduleFor({ transposition, weighted }).instantiate(), mem = ex.memory;
     const classes = normClasses(index), nn = classes ? Math.max(1, classes.values.length) : 0;
-    const order = sortByLength(corpus), T4 = transpose(corpus, order, 4), T8 = transpose(corpus, order, 8);
+    const { order } = groupByLength(corpus), T4 = transpose(corpus, order, 4), T8 = transpose(corpus, order, 8);
     const P = allocate(mem, {
       d4: T4.t.byteLength, s4: T4.flags?.byteLength ?? 0, g4: T4.goff.byteLength, d8: T8.t.byteLength, s8: T8.flags?.byteLength ?? 0, g8: T8.goff.byteLength,
       offs: corpus.offs.byteLength, order: order.byteLength, t32: 65536 * 4, t16: 65536 * 2, out: n * 8,
-      normId: nStr, tbl: K * nn * MAX_TABLE_STRIDE * 8, keys: nDocs * 8, ids: nDocs * 4, keys2: nDocs * 8, ids2: nDocs * 4, hist: 8 * 256 * 4,
+      normId: nStr, tbl: K * nn * MAX_TABLE_STRIDE * 8, keys: nDocs * 8, ids: nDocs * 4, keys2: nDocs * 8, ids2: nDocs * 4, hist: 8 * 256 * 4, ...tokenSizes(index),
     });
     new Uint16Array(mem.buffer, P.d4, T4.t.length).set(T4.t); new Uint32Array(mem.buffer, P.g4, T4.goff.length).set(T4.goff);
     new Uint16Array(mem.buffer, P.d8, T8.t.length).set(T8.t); new Uint32Array(mem.buffer, P.g8, T8.goff.length).set(T8.goff);
@@ -108,6 +99,7 @@ export const simdBackend = {
     const previous = [];
     const scanner = {
       out,
+      tokens: wasmTokenAccumulator(ex, mem, P, { nStr, K, nDocs, out }),
       prep(pattern) {
         for (const c of previous) { t32[c] = 0; t16[c] = 0; }
         previous.length = 0;
@@ -120,6 +112,13 @@ export const simdBackend = {
         }
       },
       // With word-start flags every scan is weighted; a missing rule (no weighted position, chunked pattern) weights nothing.
+      // Hits are written to hitIds/hitScores by position; sortHits orders the first m by (score, id) and keeps the first min(limit, m) (all with limit 0).
+      hitIds: ids,
+      hitScores: scores,
+      sortHits(m, limit) {
+        ex.sort_hits(P.keys, P.ids, P.keys2, P.ids2, P.hist, m, limit);
+        return { ids, scores };
+      },
       scan(patLen, kmax, rule = null) {
         if (weighted) {
           const { mask, midWord, denom = patLen } = rule ?? UNWEIGHTED;

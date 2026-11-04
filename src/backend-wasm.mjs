@@ -1,5 +1,5 @@
 import { fillCharTable } from "./kernel-js.mjs";
-import { lazyModule, allocate, wasmSupported } from "./wasm-util.mjs";
+import { lazyModule, allocate, wasmSupported, tokenSizes, wasmTokenAccumulator } from "./wasm-util.mjs";
 import scalarBase64 from "./wasm/scalar.mjs";
 
 const module = lazyModule(async () => scalarBase64);
@@ -10,9 +10,10 @@ export const wasmBackend = {
     if (!wasmSupported()) throw new Error("WebAssembly is not available");
     await module.load();
   },
-  create({ corpus }, { transposition }) {
+  create(index, { transposition }) {
+    const { corpus } = index;
     const { exports: ex } = module.instantiate(), mem = ex.memory, { starts } = corpus;
-    const P = allocate(mem, { data: corpus.data.byteLength, starts: starts?.byteLength ?? 0, offs: corpus.offs.byteLength, table: 65536 * 4, out: corpus.n * 8, st: 512 });
+    const P = allocate(mem, { data: corpus.data.byteLength, starts: starts?.byteLength ?? 0, offs: corpus.offs.byteLength, table: 65536 * 4, out: corpus.n * 8, st: 512, ...tokenSizes(index) });
     new Uint16Array(mem.buffer, P.data, corpus.data.length).set(corpus.data);
     if (starts) new Uint8Array(mem.buffer, P.starts, starts.length).set(starts);
     new Uint32Array(mem.buffer, P.offs, corpus.offs.length).set(corpus.offs);
@@ -20,6 +21,7 @@ export const wasmBackend = {
     const scanPlain = transposition ? ex.scan2t : ex.scan2, scanWeighted = transposition ? ex.scan2wt : ex.scan2w;
     return {
       out,
+      tokens: wasmTokenAccumulator(ex, mem, P, { nStr: corpus.n, K: index.K, nDocs: index.nDocs, out }),
       prep(pattern) { fillCharTable(table, pattern, previous); },
       // A missing rule (no weighted position, chunked pattern) takes the plain kernel.
       scan(patLen, kmax, rule = null) {

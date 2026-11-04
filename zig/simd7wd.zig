@@ -15,3 +15,19 @@ export fn combine_sort(
 ) u32 {
     return core.combineSort(out, n_docs, kk, norm_id, offs, tbl, nn, pat_len, denom, kmax, keys, ids, keys2, ids2, hist, limit);
 }
+
+export fn sort_hits(keys: [*]u64, ids: [*]u32, keys2: [*]u64, ids2: [*]u32, hist: [*]u32, m: u32, limit: u32) void {
+    core.radixSort(keys, ids, keys2, ids2, hist, m, limit);
+}
+
+const tokens = @import("token_core.zig");
+
+export fn token_add(out: [*]const f64, acc: [*]f64, hit: [*]u8, n: u32, idf: f64) void {
+    tokens.tokenAdd(out, acc, hit, n, idf);
+}
+export fn token_cover(out: [*]const f64, kk: u32, n_docs: u32, covered: [*]u32) void {
+    tokens.tokenCover(out, kk, n_docs, covered);
+}
+export fn token_finish(acc: [*]f64, hit: [*]const u8, n: u32, max_score: f64, kk: u32, covered: [*]const u32, terms: u32) void {
+    tokens.tokenFinish(acc, hit, n, max_score, kk, covered, terms);
+}

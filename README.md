@@ -45,10 +45,10 @@ To see what you end up with, check `ff.backend` and `ff.fallbackReason`.
 
 **Will be fixed in later versions:**
 - `ignoreLocation` is always on (and is the default here). `location`, `distance` and `findAllMatches` are accepted and ignored (with `ignoreLocation`, `findAllMatches` changes nothing in Fuse either).
-- Not supported, rejected with a `TypeError`: `useExtendedSearch`, `useTokenSearch`, unknown options, non-string queries.
+- Not supported, rejected with a `TypeError`: `useExtendedSearch`, unknown options, non-string queries.
 - Not provided: `Fuse.match`, `Fuse.parseQuery`, `Fuse.use`.
 
-**Supported:** string collections, `keys` (names, dotted paths, path arrays, weights), array values (each element is a separate string like in Fuse, at most 64 strings per document), numbers and booleans as text, `threshold` (also per search), `limit`, `shouldSort`, `sortFn`, `getFn` (also per key), `minMatchCharLength`, `includeScore`, `includeMatches` (see below), `isCaseSensitive`, `ignoreDiacritics`, `ignoreFieldNorm`, `fieldNormWeight`, blank queries (return every document, like Fuse), patterns longer than 32 characters (chunked like Fuse, slower: no in-wasm combine). `sortFn`, `shouldSort: false` and `minMatchCharLength > 1` also skip the in-wasm combine; `minMatchCharLength` additionally locates the matched fragments of every candidate string in js.
+**Supported:** string collections, `keys` (names, dotted paths, path arrays, weights), array values (each element is a separate string like in Fuse, at most 64 strings per document), numbers and booleans as text, `threshold` (also per search), `limit`, `shouldSort`, `sortFn`, `getFn` (also per key), `minMatchCharLength`, `includeScore`, `includeMatches` (see below), `isCaseSensitive`, `ignoreDiacritics`, `useTokenSearch` with `tokenize` and `tokenMatch` (see below), `ignoreFieldNorm`, `fieldNormWeight`, blank queries (return every document, like Fuse), patterns longer than 32 characters (chunked like Fuse, slower: no in-wasm combine). `sortFn`, `shouldSort: false` and `minMatchCharLength > 1` also skip the in-wasm combine; `minMatchCharLength` additionally locates the matched fragments of every candidate string in js.
 
 **Deliberate differences:**
 - `ignoreDiacritics` strips `\p{M}`, Fuse uses a fixed list of marks; 73 recently added code points differ.
@@ -59,6 +59,19 @@ To see what you end up with, check `ff.backend` and `ff.fallbackReason`.
 `add(doc)`, `remove(predicate)`, `removeAt(index)`, `setCollection(docs, index?)` and `getIndex()` work like Fuse's, including which arrays are modified: `add` pushes onto the array you passed in, `removeAt` splices it, `remove` keeps a filtered copy. The index (Fuse's format, see below) is updated at once, and the next search flattens it again, which costs about as much as creating the instance. That is fine for a batch of changes, not for adding one document between every two searches.
 
 `Fuseter.createIndex(keys, docs)` and `Fuseter.parseIndex(json)` use Fuse's index format in both directions: an index made by `Fuse.createIndex` (as the object or its parsed JSON) can be loaded here and the other way round. Pass it as `Fuseter.create(docs, options, { index })`. It saves extracting the strings from the documents; the field norms and strings of the index are used as they are (also by `includeMatches` and `sortFn`, so a `getFn` runs once per document and key). The documents must be the ones the index was made from, and, as in Fuse, `add` and `remove` update the index object you passed in. `getIndex()` returns it, or makes one on first use. `Fuseter.config` holds the defaults of new instances (`Fuseter.config.getFn` is Fuse's default getFn, which a custom `getFn` can wrap) and `Fuseter.version` the package version.
+
+## Token search
+
+`useTokenSearch: true` searches the words of the query separately, like Fuse 7.5. `"wen co"` becomes two patterns, `wen` and `co`, and a string scores `1 - sum(idf * (1 - score)) / sum(idf)` over the terms that match. A term's idf comes from how many indexed strings contain it, so rare terms count more. A string needs to match only one term, unless `tokenMatch: "all"` requires every term to be matched by some string of the document.
+
+```js
+const ff = await Fuseter.create(books, { keys: ["title"], useTokenSearch: true, tokenMatch: "all", threshold: 0.3 });
+ff.search("lord rings");
+```
+
+Terms are what `tokenize` returns for the normalised text: by default runs of letters, marks, digits and `_`, otherwise the matches of a global RegExp or the array a function returns. Results, scores and `includeMatches` are identical to Fuse's on every backend, and `add`, `remove` and `setCollection` keep the document frequencies current. A `tokenize` RegExp without the global flag is rejected (Fuse warns and uses only its first match).
+
+Each term is scanned like an ordinary query, but the in-wasm combine step is not used: a search costs one scan per term plus a js combine (the simd tier then sorts the hits in wasm). The `typing` heuristics apply to each term; as with any `typing` option, results then differ from Fuse's.
 
 ## Match highlighting
 
@@ -107,4 +120,4 @@ Cost on 10K books: `transposition` makes searches 20-25% slower, `firstLetter` r
 - `npm install`, then `npm test`: runs the equivalence suite (random corpora, all tiers, thresholds 0-1, limits, every supported option, forced fallbacks) against the Fuse 7.5 dev dependency. Takes about a minute.
 - `npm run build:wasm` rebuilds `wasm/*.wasm` and the embedded `src/wasm/*.mjs` from `zig/` (needs zig 0.17; the generated `src/wasm/*.mjs` are committed and CI fails if a rebuild changes them).
 - `node scripts/browser-check.mjs [chromium] [firefox] [webkit]` bundles the library with esbuild (code splitting) and runs the Fuse comparison, the typing options and the fallback logic in real browsers, once normally and once under a CSP that blocks wasm. Setup: `npm i --no-save playwright esbuild && npx playwright install chromium firefox`. Last run: Chromium 156 and Firefox 157 pass; Safari is untested.
-- `node scripts/bench.mjs [books.json] [--fuse] [--json=file]` prints a timing table (`--json` saves it, `node scripts/chart.mjs` turns it into the charts in `docs/`); `node scripts/bench-typing.mjs [books.json]` compares the typing heuristics with the standard kernels.
+- `node scripts/bench.mjs [books.json] [--fuse] [--json=file]` prints a timing table (`--json` saves it, `node scripts/chart.mjs` turns it into the charts in `docs/`); `node scripts/bench-typing.mjs [books.json]` compares the typing heuristics with the standard kernels, and `node scripts/bench-tokens.mjs [books.json]` compares token search with plain search and Fuse's token search (`FUSE=0` skips Fuse).

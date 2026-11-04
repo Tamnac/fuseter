@@ -62,6 +62,15 @@ export interface FuseterOptions {
    * which can be wrapped. Ignored for collections of strings.
    */
   getFn?: (doc: any, path: string[]) => unknown;
+  /**
+   * Fuse's token search: the query is split into terms, each is searched on its own, and the scores of the terms that match are combined weighted by
+   * their rarity in the collection (idf), so a rare term counts more than "the". Default false.
+   */
+  useTokenSearch?: boolean;
+  /** Splits the query and the indexed strings into terms. A RegExp needs the global flag. Default: runs of letters, marks, digits and "_". */
+  tokenize?: RegExp | ((text: string) => string[]);
+  /** With "all" a document only matches when its strings together match every term. Default "any". */
+  tokenMatch?: "any" | "all";
   /** Accepted, no effect while ignoreLocation is on. */
   findAllMatches?: boolean;
   /** Only `true` is supported (this is the default here, unlike Fuse). */

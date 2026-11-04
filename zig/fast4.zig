@@ -172,3 +172,15 @@ export fn scan2wt(
 ) void {
     scanWeightedImpl(true, data, flags, offs, n, table, pat_len, kmax, out, st, w, mid_word, denom);
 }
+
+const tokens = @import("token_core.zig");
+
+export fn token_add(out: [*]const f64, acc: [*]f64, hit: [*]u8, n: u32, idf: f64) void {
+    tokens.tokenAdd(out, acc, hit, n, idf);
+}
+export fn token_cover(out: [*]const f64, kk: u32, n_docs: u32, covered: [*]u32) void {
+    tokens.tokenCover(out, kk, n_docs, covered);
+}
+export fn token_finish(acc: [*]f64, hit: [*]const u8, n: u32, max_score: f64, kk: u32, covered: [*]const u32, terms: u32) void {
+    tokens.tokenFinish(acc, hit, n, max_score, kk, covered, terms);
+}

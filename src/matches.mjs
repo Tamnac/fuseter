@@ -1,6 +1,16 @@
 import { createAligner } from "./align.mjs";
 import { createLocator } from "./kernel-js.mjs";
 
+// The string ids grouped by length (ascending, stable): the ids of length l are order[start[l] .. start[l + 1]).
+export function groupByLength({ offs, n, maxLen }) {
+  const start = new Uint32Array(maxLen + 2);
+  for (let s = 0; s < n; s++) start[offs[s + 1] - offs[s] + 1]++;
+  for (let l = 1; l < start.length; l++) start[l] += start[l - 1];
+  const next = start.slice(), order = new Uint32Array(n);
+  for (let s = 0; s < n; s++) order[next[offs[s + 1] - offs[s]]++] = s;
+  return { start, order };
+}
+
 export function equalsPattern({ data, offs }, s, q) {
   if (offs[s + 1] - offs[s] !== q.length) return false;
   for (let i = 0, p = offs[s]; i < q.length; i++, p++) if (data[p] !== q.charCodeAt(i)) return false;
@@ -130,17 +140,22 @@ export function createMatcher(index, { slotsOf, transposition, minLength, normal
   }
 
   // For each document in `ids`, the slots that matched in key order, each with its merged `indices` (see slotsOf for the other fields).
-  return function matchesFor(ids, q, chunks, kmax, rule) {
-    const perDoc = ids.map(slotsOf), pending = [];
-    for (const slots of perDoc) for (const slot of slots) {
-      if (!equalsPattern(corpus, slot.s, q)) pending.push(slot);
-      else if (q.length >= minLength) slot.ranges.push([0, q.length - 1]);
-    }
-    for (const { pattern, start } of chunks) {
-      if (highlighting) aligner.prep(pattern, kmax, rule); else finder.prep(pattern, kmax, rule);
-      for (const slot of pending) {
-        const found = highlighting ? alignedRanges(slot.s, pattern) : finder.ranges(slot.s, pattern.length, start);
-        if (found) slot.ranges.push(...found);
+  // `plans` are the patterns searched ({ q, chunks, kmax, rule }, see planFor in search.mjs): one, or one per term of a token search, whose ranges are merged.
+  return function matchesFor(ids, plans) {
+    const perDoc = ids.map(slotsOf);
+    for (const { q, chunks, kmax, rule } of plans) {
+      if (!q.length) continue;
+      const pending = [];
+      for (const slots of perDoc) for (const slot of slots) {
+        if (!equalsPattern(corpus, slot.s, q)) pending.push(slot);
+        else if (q.length >= minLength) slot.ranges.push([0, q.length - 1]);
+      }
+      for (const { pattern, start } of chunks) {
+        if (highlighting) aligner.prep(pattern, kmax, rule); else finder.prep(pattern, kmax, rule);
+        for (const slot of pending) {
+          const found = highlighting ? alignedRanges(slot.s, pattern) : finder.ranges(slot.s, pattern.length, start);
+          if (found) slot.ranges.push(...found);
+        }
       }
     }
     return perDoc.map(slots => slots.filter(slot => slot.ranges.length).map(slot => {

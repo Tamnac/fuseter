@@ -3,6 +3,7 @@ import { buildIndex, defaultGetFn } from "./index-build.mjs";
 import { resolveHighlighting } from "./matches.mjs";
 import { createSearcher, defaultSortFn } from "./search.mjs";
 import { textNormalizer } from "./text.mjs";
+import { checkTokenize, TOKEN_MATCH } from "./tokens.mjs";
 import { resolveTyping } from "./typing.mjs";
 import { VERSION } from "./version.mjs";
 
@@ -15,10 +16,10 @@ const INDICES_IN = ["normalized", "original"];
 const CONFIG = {
   keys: [], threshold: 0.6, includeScore: false, includeMatches: false, indicesIn: "normalized", highlighting: null, isCaseSensitive: false, ignoreDiacritics: false,
   ignoreFieldNorm: false, fieldNormWeight: 1, shouldSort: true, sortFn: defaultSortFn, minMatchCharLength: 1, getFn: defaultGetFn,
-  location: 0, distance: 100, findAllMatches: false, ignoreLocation: true, useExtendedSearch: false, useTokenSearch: false,
+  location: 0, distance: 100, findAllMatches: false, ignoreLocation: true, useExtendedSearch: false, useTokenSearch: false, tokenize: undefined, tokenMatch: "any",
   typing: null,   // opt-in heuristics, not Fuse compatible (see typing.mjs)
 };
-const UNSUPPORTED = { useExtendedSearch: false, useTokenSearch: false, ignoreLocation: true };
+const UNSUPPORTED = { useExtendedSearch: false, ignoreLocation: true };
 
 function resolveOptions(options) {
   for (const name of Object.keys(options)) if (!(name in CONFIG)) throw new TypeError(`fuseter: unknown option '${name}'`);
@@ -26,6 +27,8 @@ function resolveOptions(options) {
   for (const [name, only] of Object.entries(UNSUPPORTED)) if (resolved[name] !== only) throw new TypeError(`fuseter: option '${name}' is not supported (only ${JSON.stringify(only)})`);
   for (const name of ["sortFn", "getFn"]) if (resolved[name] != null && typeof resolved[name] !== "function") throw new TypeError(`fuseter: '${name}' must be a function`);
   if (typeof resolved.minMatchCharLength !== "number") throw new TypeError("fuseter: minMatchCharLength must be a number");
+  checkTokenize(resolved.tokenize);
+  if (!TOKEN_MATCH.includes(resolved.tokenMatch)) throw new TypeError(`fuseter: tokenMatch must be one of ${TOKEN_MATCH.join(", ")}`);
   if (!INDICES_IN.includes(resolved.indicesIn)) throw new TypeError(`fuseter: indicesIn must be one of ${INDICES_IN.join(", ")}`);
   if (resolveHighlighting(resolved.highlighting) && !resolved.includeMatches) throw new TypeError("fuseter: 'highlighting' needs includeMatches");
   return resolved;

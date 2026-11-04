@@ -420,7 +420,14 @@ pub fn combineSort(
             m += 1;
         }
     }
-    if (m < 2) return m;
+    radixSort(keys, ids, keys2, ids2, hist, m, limit);
+    return m;
+}
+
+// Stable LSD radix sort of the first m doubles in keys (positive doubles order like their bit patterns) with their ids; the first min(limit, m)
+// sorted entries (all with limit 0) end up in keys/ids.
+pub fn radixSort(keys: [*]u64, ids: [*]u32, keys2: [*]u64, ids2: [*]u32, hist: [*]u32, m: u32, limit: u32) void {
+    if (m < 2) return;
     @memset(hist[0 .. 8 * 256], 0);
     for (keys[0..m]) |key| {
         inline for (0..8) |p| hist[p * 256 + @as(usize, @intCast((key >> (8 * p)) & 255))] += 1;
@@ -460,5 +467,4 @@ pub fn combineSort(
         @memcpy(keys[0..cnt], src_k[0..cnt]);
         @memcpy(ids[0..cnt], src_i[0..cnt]);
     }
-    return m;
 }

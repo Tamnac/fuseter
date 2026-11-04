@@ -89,7 +89,7 @@ describe("collection and options", () => {
   });
 
   test("unsupported options are rejected, not ignored", async () => {
-    for (const bad of [{ useExtendedSearch: true }, { ignoreLocation: false }, { useTokenSearch: true }, { sortFn: "score" }, { getFn: 1 }, { minMatchCharLength: "2" }, { typo: 1 }]) {
+    for (const bad of [{ useExtendedSearch: true }, { ignoreLocation: false }, { tokenMatch: "some" }, { tokenize: "\w+" }, { tokenize: /w+/ }, { sortFn: "score" }, { getFn: 1 }, { minMatchCharLength: "2" }, { typo: 1 }]) {
       await assert.rejects(Fuseter.create(docs, { ...options, ...bad }), TypeError, JSON.stringify(Object.keys(bad)));
     }
     await assert.rejects(Fuseter.create(docs, { keys: [{ name: "title", weight: 0 }] }), RangeError);
@@ -99,5 +99,17 @@ describe("collection and options", () => {
   test("accepted no-op options", async () => {
     const ff = await Fuseter.create(docs, { ...options, ignoreLocation: true, distance: 100, location: 0, minMatchCharLength: 1, shouldSort: true });
     assert.ok(ff.search("harry").length >= 0);
+  });
+});
+
+describe("token search with typing heuristics", () => {
+  test("applies the heuristics to each term on every backend", async () => {
+    const books = [{ title: "The Hobbit" }, { title: "Harry Potter and the Chamber of Secrets" }, { title: "Lord of the Rings" }];
+    const typing = { firstLetter: true, transposition: true };
+    for (const backend of ["simd", "wasm", "js"]) {
+      const ff = await Fuseter.create(books, { keys: ["title"], useTokenSearch: true, typing, threshold: 0.4 }, { backend, fallback: "throw" });
+      assert.equal(ff.search("hary poter")[0]?.item, books[1], backend);
+      assert.equal(ff.search("hobbti")[0]?.item, books[0], backend);
+    }
   });
 });

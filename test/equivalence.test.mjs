@@ -216,3 +216,57 @@ describe("ordering and matching options match Fuse", () => {
     await check(docs, { keys, getFn, includeMatches: true }, queries(r, docs, 30), { thresholds: [0.2, 0.5] });
   });
 });
+
+describe("token search matches Fuse", () => {
+  const TOKENS = { useTokenSearch: true };
+  const queries = (r, strings, count) => [...randomQueries(r, strings, count), "lord rings", "the the", "wen co", "r2 d2 1984", "!!!", "x  b a", "straße café", "dust-jacket worn_spine"];
+  const objectStrings = docs => stringsOf(docs, ["title", "author"]);
+  const thresholds = [0.1, 0.3, 0.6, 1];
+
+  for (const tokenMatch of ["any", "all"]) {
+    test(`object docs, weighted keys, tokenMatch ${tokenMatch}`, async () => {
+      const r = rng(61), docs = randomDocs(r, 250);
+      await check(docs, { keys: KEYS, ...TOKENS, tokenMatch }, queries(r, objectStrings(docs), 30), { thresholds });
+    });
+
+    test(`array values, matches, tokenMatch ${tokenMatch}`, async () => {
+      const r = rng(62), docs = randomDocs(r, 250);
+      await check(docs, { keys: ["title", "tags", ["meta", "note"]], includeMatches: true, ...TOKENS, tokenMatch }, queries(r, objectStrings(docs), 25), { thresholds: [0.2, 0.5] });
+    });
+
+    test(`string collection, tokenMatch ${tokenMatch}`, async () => {
+      const r = rng(63), docs = Array.from({ length: 300 }, () => randomText(r, 0, 5));
+      await check(docs, { includeMatches: true, ...TOKENS, tokenMatch }, queries(r, docs, 30), { thresholds });
+    });
+  }
+
+  test("normalisation options and no field norm", async () => {
+    const r = rng(64), docs = randomDocs(r, 250);
+    await check(docs, { keys: KEYS, ...TOKENS, isCaseSensitive: true, ignoreFieldNorm: true }, queries(r, objectStrings(docs), 20), { thresholds: [0.2, 0.5] });
+    await check(docs, { keys: KEYS, ...TOKENS, ignoreDiacritics: true, includeMatches: true }, [...queries(r, objectStrings(docs), 20), "naivé cafe", "ORSTED lodz"], { thresholds: [0.2, 0.5] });
+  });
+
+  test("minMatchCharLength, sortFn, shouldSort: false", async () => {
+    const r = rng(65), docs = randomDocs(r, 250);
+    await check(docs, { keys: KEYS, ...TOKENS, minMatchCharLength: 3, includeMatches: true }, queries(r, objectStrings(docs), 25), { thresholds: [0.2, 0.6] });
+    await check(docs, { keys: KEYS, ...TOKENS, sortFn: (a, b) => b.score - a.score, includeMatches: true }, queries(r, objectStrings(docs), 20), { thresholds: [0.3, 0.7] });
+    await check(docs, { keys: KEYS, ...TOKENS, shouldSort: false }, queries(r, objectStrings(docs), 20), { thresholds: [0.3, 0.7], limits: [undefined, 3] });
+  });
+
+  test("custom tokenizers, terms over 32 characters", async () => {
+    const r = rng(66), docs = randomDocs(r, 250);
+    const long = "abcdefghijklmnopqrstuvwxyzabcdefghijklmnop";
+    for (const tokenize of [/[^s-]+/g, text => text.split(/s+/).filter(Boolean), text => [...text.matchAll(/[a-z]{2,}/g)].map(m => m[0].toUpperCase())]) {
+      await check(docs, { keys: KEYS, ...TOKENS, tokenize, tokenMatch: "all" }, [...queries(r, objectStrings(docs), 15), `lord ${long}`], { thresholds: [0.3, 0.6] });
+    }
+  });
+
+  test("collection changes keep the document frequencies current", async () => {
+    const r = rng(67), docs = randomDocs(r, 120), options = { keys: KEYS, ...TOKENS };
+    const ff = await Fuseter.create(docs, { ...options, includeScore: true }), fuse = fuseFor([...docs], options);   // add pushes onto the array it was given
+    for (const [change, args] of [["add", [{ title: "the lord of the rings", author: "Tolkien" }]], ["removeAt", [3]], ["remove", [(d, i) => i % 5 === 0]]]) {
+      ff[change](...args); fuse[change](...args);
+      for (const q of ["lord rings", "tolkien", "harry potter"]) assert.equal(compare(ff.search(q), fuse.search(q)), null, `${change} ${q}`);
+    }
+  });
+});
