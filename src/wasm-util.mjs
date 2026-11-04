@@ -38,11 +38,16 @@ export const tokenSizes = ({ nStr, nDocs }) => ({ acc: nStr * 8, hit: nStr, cove
 
 // The in-wasm version of jsTokenAccumulator (tokens.mjs); `P` holds the pointers of tokenSizes, `out` is the view of the scanner's score array.
 export function wasmTokenAccumulator(ex, mem, P, { nStr, K, nDocs, out }) {
+  const pointerTo = scores => {
+    if (scores.buffer === mem.buffer) return scores.byteOffset;
+    out.set(scores);   // scores computed outside the module (chunked patterns)
+    return P.out;
+  };
   const acc = new Float64Array(mem.buffer, P.acc, nStr), hit = new Uint8Array(mem.buffer, P.hit, nStr), covered = new Uint32Array(mem.buffer, P.covered, nDocs);
   return {
     begin() { acc.fill(0); hit.fill(0); covered.fill(0); },
-    add(scores, idf) { ex.token_add(P.out, P.acc, P.hit, nStr, idf); },
-    cover() { ex.token_cover(P.out, K, nDocs, P.covered); },
+    add(scores, idf) { ex.token_add(pointerTo(scores), P.acc, P.hit, nStr, idf); },
+    cover(scores) { ex.token_cover(pointerTo(scores), K, nDocs, P.covered); },
     finish(maxScore, terms) {
       ex.token_finish(P.acc, P.hit, nStr, maxScore, K, P.covered, terms);
       return acc;

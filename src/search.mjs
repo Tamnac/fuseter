@@ -112,17 +112,18 @@ export function createSearcher(index, scanner, { threshold: defaultThreshold, ig
   // Fuse's token score of every string: the idf-weighted mean of the terms' scores, 1 - sum(idf * (1 - score)) / sum(idf), over the terms that match
   // (-1 when none does). With tokenMatch "all", the documents whose strings together miss a term are dropped.
   function tokenScores(plans) {
-    const requireAll = tokenMatch === "all", { tokens } = scanner;
+    const requireAll = tokenMatch === "all", { tokens } = scanner, lastUse = new Map(plans.map((plan, i) => [plan.q, i])), kept = new Map();
     tokens.begin();
     let maxScore = 0;
-    for (const plan of plans) {
+    plans.forEach((plan, i) => {
       maxScore += plan.idf;
-      if (!plan.q.length) continue;
-      const scores = patternScores(plan);
-      if (scores !== scanner.out) scanner.out.set(scores);
-      tokens.add(scanner.out, plan.idf);
-      if (requireAll) tokens.cover(scanner.out);
-    }
+      if (!plan.q.length) return;
+      // A repeated term is scanned once: its scores are kept for its later occurrences (the scanner reuses its array).
+      const scores = kept.get(plan.q) ?? patternScores(plan);
+      tokens.add(scores, plan.idf);
+      if (requireAll) tokens.cover(scores);
+      if (lastUse.get(plan.q) !== i && !kept.has(plan.q)) kept.set(plan.q, scores.slice());
+    });
     return tokens.finish(maxScore, requireAll ? plans.length : 0);
   }
 

@@ -253,6 +253,12 @@ describe("token search matches Fuse", () => {
     await check(docs, { keys: KEYS, ...TOKENS, shouldSort: false }, queries(r, objectStrings(docs), 20), { thresholds: [0.3, 0.7], limits: [undefined, 3] });
   });
 
+  test("repeated terms", async () => {
+    const r = rng(67), docs = randomDocs(r, 250), long = "abcdefghijklmnopqrstuvwxyzabcdefghijklmnop";
+    const base = objectStrings(docs), repeated = randomQueries(r, base, 15).map(q => { const [w = "lord"] = q.split(" "); return `${w} lord ${w} rings ${w}`; });
+    for (const tokenMatch of ["any", "all"]) await check(docs, { keys: KEYS, ...TOKENS, tokenMatch }, [...repeated, `${long} lord ${long} ${long}`, "a b a c a"], { thresholds: [0.3, 0.6] });
+  });
+
   test("custom tokenizers, terms over 32 characters", async () => {
     const r = rng(66), docs = randomDocs(r, 250);
     const long = "abcdefghijklmnopqrstuvwxyzabcdefghijklmnop";
