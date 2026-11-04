@@ -27,10 +27,12 @@ The same measurements without Fuse, using a linear scale to better see differenc
 
 | tier | needs | download (gzip) | search, 10K docs, threshold 0.3 |
 |---|---|---|---|
-| `simd` | WebAssembly SIMD (all current browsers and Node) | 27.5 KB | 0.4-0.7 ms |
-| `wasm` | WebAssembly | 15.2 KB | 2-3 ms |
-| `js` | nothing | 11.2 KB | 4-5 ms |
+| `simd` | WebAssembly SIMD (all current browsers and Node) | 31.2 KB | 0.4-0.7 ms |
+| `wasm` | WebAssembly | 15.9 KB | 2-3 ms |
+| `js` | nothing | 11.6 KB | 4-5 ms |
 | Fuse 7.5 | nothing | | 40-200 ms |
+
+Download sizes are the entry point minified with esbuild and gzipped; the simd entry includes the base64 wasm module (about 4/3 of its raw size).
 
 What to choose:
 
@@ -71,7 +73,7 @@ ff.search("lord rings");
 
 Terms are what `tokenize` returns for the normalised text: by default runs of letters, marks, digits and `_`, otherwise the matches of a global RegExp or the array a function returns. Results, scores and `includeMatches` are identical to Fuse's on every backend, and `add`, `remove` and `setCollection` keep the document frequencies current. A `tokenize` RegExp without the global flag is rejected (Fuse warns and uses only its first match).
 
-Each term is scanned like an ordinary query, but the in-wasm combine step is not used: a search costs one scan per term plus a js combine (the simd tier then sorts the hits in wasm). The `typing` heuristics apply to each term; as with any `typing` option, results then differ from Fuse's.
+Each distinct term is scanned like an ordinary query (a repeated term once), and the scores are accumulated in wasm on the wasm and simd tiers. The in-wasm combine step is not used: a search costs the scans plus a js combine, and the simd tier sorts the hits in wasm. The simd tier scans several short terms in one pass when their lengths add up to 16 characters or less (not with `minMatchCharLength` or any `typing` option, nor for terms over 16 characters). On 10K books at threshold 0.3 a token search of 1-7 terms takes 0.3-1.1 ms on simd, 1.6-5.7 ms on wasm and 2.7-10 ms on js, against 0.25-0.5 ms, 1.3-2.2 ms and 2-4 ms for a plain search of the same text. The `typing` heuristics apply to each term; as with any `typing` option, results then differ from Fuse's.
 
 ## Match highlighting
 
@@ -113,7 +115,7 @@ Fuseter.create(models, { keys: ["name"], typing: { firstLetter: true, transposit
   - Words start after spaces and punctuation, and at camelCase humps (`myValue`). Queries over 32 characters ignore the option.
 - `transposition`: swapping two adjacent letters costs 1 error instead of 2.
 
-Cost on 10K books: `transposition` makes searches 20-25% slower, `firstLetter` roughly 2x slower (simd: 0.3 ms becomes 0.5 ms; see `scripts/bench-typing.mjs`). On the simd tier each option set loads an extra 9-12 KB (gzip) wasm module the first time it is used.
+Cost on 10K books: `transposition` makes searches 20-25% slower, `firstLetter` roughly 2x slower (simd: 0.3 ms becomes 0.5 ms; see `scripts/bench-typing.mjs`). On the simd tier each option set loads an extra 13-17 KB (gzip) wasm module the first time it is used.
 
 ## Development
 
