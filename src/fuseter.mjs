@@ -124,7 +124,7 @@ export function defineFuseter(backends, defaultBackend) {
       for (const tier of this._candidates) {
         if (failures.some(([t]) => t === tier)) continue;
         try {
-          const scanner = backends[tier].create(index, { ignoreFieldNorm: o.ignoreFieldNorm, transposition: this._typing.transposition });
+          const scanner = backends[tier].create(index, { ignoreFieldNorm: o.ignoreFieldNorm, transposition: this._typing.transposition, useTokenSearch: o.useTokenSearch });
           const searcher = createSearcher(index, scanner, { ...o, highlighting: resolveHighlighting(o.highlighting), typing: this._typing, normalize: textNormalizer(o) });
           this._search = searcher.search;
           this.timings = searcher.timings;

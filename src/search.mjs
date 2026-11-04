@@ -113,16 +113,18 @@ export function createSearcher(index, scanner, { threshold: defaultThreshold, ig
   // (-1 when none does). With tokenMatch "all", the documents whose strings together miss a term are dropped.
   function tokenScores(plans) {
     const requireAll = tokenMatch === "all", { tokens } = scanner, lastUse = new Map(plans.map((plan, i) => [plan.q, i])), kept = new Map();
+    const batch = finder ? null : scanner.scanMany?.(plans.filter(plan => plan.q.length && plan.chunks.length === 1 && !plan.rule));
+    if (batch) for (const [q, scores] of batch) settleExact(scores, q);
     tokens.begin();
     let maxScore = 0;
     plans.forEach((plan, i) => {
       maxScore += plan.idf;
       if (!plan.q.length) return;
       // A repeated term is scanned once: its scores are kept for its later occurrences (the scanner reuses its array).
-      const scores = kept.get(plan.q) ?? patternScores(plan);
+      const scores = batch?.get(plan.q) ?? kept.get(plan.q) ?? patternScores(plan);
       tokens.add(scores, plan.idf);
       if (requireAll) tokens.cover(scores);
-      if (lastUse.get(plan.q) !== i && !kept.has(plan.q)) kept.set(plan.q, scores.slice());
+      if (lastUse.get(plan.q) !== i && !kept.has(plan.q) && !batch?.has(plan.q)) kept.set(plan.q, scores.slice());
     });
     return tokens.finish(maxScore, requireAll ? plans.length : 0);
   }

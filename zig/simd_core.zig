@@ -362,6 +362,114 @@ pub fn Scan(comptime T: type, comptime L: usize, comptime D: bool, comptime MS: 
             }
         }
 
+        // ---- several short patterns in one state word (standard kernel only, T = u16) ----
+        // Field f of a lane (w = 16 / fields bits wide, pattern of at most w characters) holds the state of pattern f. A shift moves the top bit of a field into
+        // the next one, but every shift is followed by an OR with the field start bits (ones), which overwrites it. Bits above a field's match bit are never read.
+
+        fn groupPacked(
+            comptime KM: u32, row_base: [*]const u16, table: [*]const T, len_v: V, min_len: u32, max_len: u32,
+            ones: V, masks: *const [4]V, fields: u32, ini: *const [32]T, best: *[4]V,
+        ) void {
+            const zero = splat(0);
+            var st: [KM + 1]V = undefined;
+            var hit_st: [KM + 1]V = undefined;
+            inline for (0..KM + 1) |q| {
+                st[q] = splat(ini[q]);
+                hit_st[q] = zero;
+            }
+            var r: u32 = 0;
+            while (r < max_len) : (r += 1) {
+                const row = row_base + r * L;
+                var cm_arr: [L]T = undefined;
+                inline for (0..L) |l| cm_arr[l] = table[row[l]];
+                const cm: V = cm_arr;
+                const active: B = splat(@intCast(r)) < len_v;
+                const all_active = r < min_len;
+                var old_l = zero;
+                var new_l = zero;
+                inline for (0..KM + 1) |i| {
+                    const oi = st[i];
+                    var nv = ((oi +% oi) | ones) & cm;
+                    if (i > 0) {
+                        const m = old_l | new_l;
+                        nv |= (m +% m) | ones | old_l;
+                    }
+                    if (!all_active) nv = @select(T, active, nv, oi);
+                    st[i] = nv;
+                    hit_st[i] |= nv;
+                    old_l = oi;
+                    new_l = nv;
+                }
+            }
+            var f: u32 = 0;
+            while (f < fields) : (f += 1) {
+                var b = splat(~@as(T, 0));
+                inline for (0..KM + 1) |idx| {
+                    const i = KM - idx;
+                    b = @select(T, (hit_st[i] & masks[f]) != zero, splat(@intCast(i)), b);
+                }
+                best[f] = b;
+            }
+        }
+
+        pub const MAX_FIELDS = 4;
+        pub const MAX_PACKED_KMAX = 4;
+
+        // Pattern f (at most 16 / fields characters, kmax at most MS) writes its scores to out + f * n.
+        pub fn runPacked(
+            data: [*]const u16, goff: [*]const u32, offs: [*]const u32, order: [*]const u32, n: u32, table: [*]const T,
+            fields: u32, pat_lens: [*]const u32, kmaxs: [*]const u32, out: [*]f64,
+        ) void {
+            const w: u5 = @intCast(16 / fields);
+            var masks: [MAX_FIELDS]V = undefined;
+            var plfs: [MAX_FIELDS]f64 = undefined;
+            var ones: T = 0;
+            var kmax: u32 = 0;
+            var need: u32 = ~@as(u32, 0);
+            var f: u32 = 0;
+            while (f < fields) : (f += 1) {
+                const shift: u4 = @intCast(f * w);
+                masks[f] = splat(@as(T, 1) << @intCast(pat_lens[f] - 1 + shift));
+                plfs[f] = @floatFromInt(pat_lens[f]);
+                ones |= @as(T, 1) << shift;
+                kmax = @max(kmax, kmaxs[f]);
+                need = @min(need, pat_lens[f] - kmaxs[f]);
+            }
+            var ini: [32]T = @splat(0);
+            var q: u32 = 0;
+            while (q <= kmax) : (q += 1) {
+                f = 0;
+                while (f < fields) : (f += 1) {
+                    const bits: u5 = @intCast(@min(q, w));
+                    ini[q] |= @as(T, @intCast(((@as(u32, 1) << bits) - 1) << @intCast(f * w)));
+                }
+            }
+            const first = firstGroup(offs, order, n, need);
+            f = 0;
+            while (f < fields) : (f += 1) for (order[0..first]) |s| {
+                out[f * n + s] = -1.0;
+            };
+            const ones_v = splat(ones);
+            var g: usize = first;
+            while (g < n) : (g += L) {
+                const p = prep(g, offs, order, n);
+                var best: [MAX_FIELDS]V = undefined;
+                switch (kmax) {
+                    inline 0...MAX_PACKED_KMAX => |k| groupPacked(k, data + goff[g / L], table, p.len_v, p.min_len, p.max_len, ones_v, &masks, fields, &ini, &best),
+                    else => unreachable,
+                }
+                f = 0;
+                while (f < fields) : (f += 1) {
+                    inline for (0..L) |l| {
+                        if (g + l < n) {
+                            const v = best[f][l];
+                            out[f * n + order[g + l]] = if (v != ~@as(T, 0) and v <= kmaxs[f]) @max(@as(f64, @floatFromInt(v)) / plfs[f], 0.001) else -1.0;
+                        }
+                    }
+                }
+            }
+        }
+
         pub fn run(
             data: [*]const u16, goff: [*]const u32, offs: [*]const u32, order: [*]const u32, n: u32, table: [*]const T,
             pat_len: u32, kmax: u32, out: [*]f64,
