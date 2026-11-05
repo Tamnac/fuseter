@@ -89,7 +89,7 @@ describe("collection and options", () => {
   });
 
   test("unsupported options are rejected, not ignored", async () => {
-    for (const bad of [{ useExtendedSearch: true }, { location: 1.5 }, { distance: -1 }, { ignoreLocation: false, typing: { transposition: true } }, { ignoreLocation: false, includeMatches: true, highlighting: { aligned: true } }, { tokenMatch: "some" }, { tokenize: "\w+" }, { tokenize: /w+/ }, { sortFn: "score" }, { getFn: 1 }, { minMatchCharLength: "2" }, { typo: 1 }]) {
+    for (const bad of [{ location: 1.5 }, { distance: -1 }, { ignoreLocation: false, typing: { transposition: true } }, { ignoreLocation: false, includeMatches: true, highlighting: { aligned: true } }, { tokenMatch: "some" }, { tokenize: "\w+" }, { tokenize: /w+/ }, { sortFn: "score" }, { getFn: 1 }, { minMatchCharLength: "2" }, { typo: 1 }]) {
       await assert.rejects(Fuseter.create(docs, { ...options, ...bad }), TypeError, JSON.stringify(Object.keys(bad)));
     }
     await assert.rejects(Fuseter.create(docs, { keys: [{ name: "title", weight: 0 }] }), RangeError);

@@ -18,10 +18,11 @@ export function fillCharTable(table, pattern, previous) {
 }
 
 // One-pass multi-level Bitap over every string: out[s] = best error level / patLen (clamped to >= 0.001), or -1 without a match.
-function scan(corpus, patLen, T, kmax, out, S) {
-  const { data, offs, n } = corpus;
+function scan(corpus, patLen, T, kmax, out, S, ids, count) {
+  const { data, offs } = corpus;
   const mask = 1 << (patLen - 1), need = patLen - kmax;
-  for (let s = 0; s < n; s++) {
+  for (let r = 0; r < count; r++) {
+    const s = ids ? ids[r] : r;
     const ts = offs[s], textLen = offs[s + 1] - ts;
     if (textLen < need) { out[s] = -1; continue; }
     let K = kmax, best = -1;
@@ -45,10 +46,11 @@ function scan(corpus, patLen, T, kmax, out, S) {
 // Same scan with adjacent transpositions as one error (optimal string alignment distance, Hyyro's bit-parallel extension).
 // Pattern bit p is set in `swap` when the pattern characters at p-1 and p are the last two text characters read, in swapped order;
 // level i then also takes level i-1 from two steps back, shifted by two (bit 1 is the empty prefix, which always matches).
-function scanTransposed(corpus, patLen, T, kmax, out, S, S2) {
-  const { data, offs, n } = corpus;
+function scanTransposed(corpus, patLen, T, kmax, out, S, S2, ids, count) {
+  const { data, offs } = corpus;
   const mask = 1 << (patLen - 1), need = patLen - kmax;
-  for (let s = 0; s < n; s++) {
+  for (let r = 0; r < count; r++) {
+    const s = ids ? ids[r] : r;
     const ts = offs[s], textLen = offs[s + 1] - ts;
     if (textLen < need) { out[s] = -1; continue; }
     let K = kmax, best = -1, previous = 0;
@@ -118,7 +120,12 @@ export function jsScanner(corpus, { transposition = false } = {}) {
     prep(pattern) { fillCharTable(T, pattern, previous); },
     scan(patLen, kmax, rule = null) {
       if (rule) scanWeighted(corpus, patLen, T, kmax, rule, transposition, out, S, S2);
-      else if (transposition) scanTransposed(corpus, patLen, T, kmax, out, S, S2); else scan(corpus, patLen, T, kmax, out, S);
+      else if (transposition) scanTransposed(corpus, patLen, T, kmax, out, S, S2, null, corpus.n); else scan(corpus, patLen, T, kmax, out, S, null, corpus.n);
+      return out;
+    },
+    // Only the first `count` strings of `ids` are scored (no rule); the other entries of the result are stale.
+    scanSubset(patLen, kmax, ids, count) {
+      if (transposition) scanTransposed(corpus, patLen, T, kmax, out, S, S2, ids, count); else scan(corpus, patLen, T, kmax, out, S, ids, count);
       return out;
     },
   };

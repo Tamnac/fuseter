@@ -36,6 +36,7 @@ function mergeIndices(indices) {
 function toOriginal(raw, indices, normalize) {
   const normalized = normalize(raw);
   if (normalized === raw) return indices;
+  indices = indices.filter(([a, b]) => a <= b);   // the empty range an inverse operator gives a string that normalises to nothing
   const first = [], end = [], pieceOf = [];
   for (let i = 0; i < raw.length;) {
     const width = raw.codePointAt(i) > 0xffff ? 2 : 1, piece = normalize(raw.slice(i, i + width));
@@ -143,12 +144,16 @@ export function createMatcher(index, { slotsOf, transposition, minLength, normal
 
   // For each document in `ids`, the slots that matched in key order, each with its merged `indices` (see slotsOf for the other fields).
   // `plans` are the patterns searched ({ q, chunks, kmax, rule }, see planFor in search.mjs): one, or one per term of a token search, whose ranges are merged.
-  return function matchesFor(ids, plans) {
+  // An extended search passes `matching` ({ ranges(s), applies(s, plan) }): the ranges of the exact-style terms of a string, and whether a plan is one of its matched group.
+  return function matchesFor(ids, plans, matching = null) {
     const perDoc = ids.map(slotsOf);
-    for (const { q, chunks, kmax, rule, threshold } of plans) {
+    if (matching) for (const slots of perDoc) for (const slot of slots) slot.ranges.push(...matching.ranges(slot.s));
+    for (const plan of plans) {
+      const { q, chunks, kmax, rule, threshold } = plan;
       if (!q.length) continue;
       const pending = [];
       for (const slots of perDoc) for (const slot of slots) {
+        if (matching && !matching.applies(slot.s, plan)) continue;
         if (!equalsPattern(corpus, slot.s, q)) pending.push(slot);
         else if (q.length >= minLength) slot.ranges.push([0, q.length - 1]);
       }

@@ -2,7 +2,7 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { Fuseter } from "../src/index.mjs";
-import { rng, randomDocs, randomQueries, stringsOf, compare, fuseFor, randomText } from "./helpers.mjs";
+import { rng, randomDocs, randomQueries, stringsOf, compare, fuseFor, randomText, edit } from "./helpers.mjs";
 
 const BACKENDS = ["simd", "wasm", "js"];
 const THRESHOLDS = [0, 0.1, 0.25, 0.4, 0.6, 0.8, 1];
@@ -332,6 +332,81 @@ describe("token search matches Fuse", () => {
     for (const [change, args] of [["add", [{ title: "the lord of the rings", author: "Tolkien" }]], ["removeAt", [3]], ["remove", [(d, i) => i % 5 === 0]]]) {
       ff[change](...args); fuse[change](...args);
       for (const q of ["lord rings", "tolkien", "harry potter"]) assert.equal(compare(ff.search(q), fuse.search(q)), null, `${change} ${q}`);
+    }
+  });
+});
+
+describe("extended search matches Fuse", () => {
+  const EXTENDED = { useExtendedSearch: true };
+  const FIXED = ["lord | harry", "'lord !rings", "^the lord$", "=the | =hobbit", "!^the", "!hobbit$", "'\"the lord\" | ^\"dust jacket\"$", "\"worn-spine\"", "lord\\|rings", "|", "' !", "=", "^", "$ !x", "stephen !king | agatha !christie", "!a", "!\"dust jacket\" lord"];
+  // Operators applied to fragments of the documents' own text, so that most queries have hits.
+  const queries = (r, strings, count) => {
+    const ops = ["", "'", "^", "=", "!", "!^"], tails = ["", "", "$", "$", "$"], out = [...FIXED];
+    const piece = () => { const s = r.pick(strings); const word = s.split(/s+/)[0] ?? ""; return r.int(3) ? edit(r, word) : s.slice(0, 1 + r.int(8)); };
+    while (out.length < count) {
+      const group = () => Array.from({ length: 1 + r.int(3) }, () => { const text = piece(); return text ? r.pick(ops) + (text.includes(" ") ? `"${text}"` : text) + r.pick(tails) : "a"; }).join(" ");
+      out.push(Array.from({ length: 1 + r.int(3) }, group).join(r.int(2) ? " | " : "|"));
+    }
+    return out;
+  };
+  const objectStrings = docs => stringsOf(docs, ["title", "author"]);
+  const thresholds = [0, 0.2, 0.4, 0.7];
+
+  test("object docs, weighted keys", async () => {
+    const r = rng(91), docs = randomDocs(r, 250);
+    await check(docs, { keys: KEYS, ...EXTENDED }, queries(r, objectStrings(docs), 80), { thresholds });
+  });
+
+  test("array values with matches", async () => {
+    const r = rng(92), docs = randomDocs(r, 250);
+    await check(docs, { keys: ["title", "tags", ["meta", "note"]], includeMatches: true, ...EXTENDED }, queries(r, objectStrings(docs), 60), { thresholds: [0.2, 0.5] });
+  });
+
+  test("string collection with matches", async () => {
+    const r = rng(93), docs = Array.from({ length: 300 }, () => randomText(r, 0, 5));
+    await check(docs, { includeMatches: true, ...EXTENDED }, queries(r, docs, 60), { thresholds });
+  });
+
+  test("normalisation options and no field norm", async () => {
+    const r = rng(94), docs = randomDocs(r, 250);
+    await check(docs, { keys: KEYS, ...EXTENDED, isCaseSensitive: true, ignoreFieldNorm: true }, queries(r, objectStrings(docs), 40), { thresholds: [0.2, 0.5] });
+    await check(docs, { keys: KEYS, ...EXTENDED, ignoreDiacritics: true, includeMatches: true }, [...queries(r, objectStrings(docs), 40), "=cafe | 'naivé", "^orsted !lodz$"], { thresholds: [0.2, 0.5] });
+  });
+
+  test("minMatchCharLength, sortFn, shouldSort: false, chunked patterns", async () => {
+    const r = rng(95), docs = randomDocs(r, 250), long = "the lord of the rings the fellowship of the ring and more";
+    await check(docs, { keys: KEYS, ...EXTENDED, minMatchCharLength: 3, includeMatches: true }, queries(r, objectStrings(docs), 40), { thresholds: [0.2, 0.6] });
+    await check(docs, { keys: KEYS, ...EXTENDED, sortFn: (a, b) => b.score - a.score, includeMatches: true }, queries(r, objectStrings(docs), 30), { thresholds: [0.3, 0.7] });
+    await check(docs, { keys: KEYS, ...EXTENDED, shouldSort: false }, queries(r, objectStrings(docs), 30), { thresholds: [0.3, 0.7] });
+    await check(docs, { keys: KEYS, ...EXTENDED, includeMatches: true }, [`${long} | 'lord`, `'lord "${long}"`], { thresholds: [0.3, 0.6] });
+  });
+
+  test("location scoring", async () => {
+    const r = rng(96), docs = randomDocs(r, 250);
+    await check(docs, { keys: KEYS, ...EXTENDED, ignoreLocation: false, includeMatches: true, location: 3, distance: 40 }, queries(r, objectStrings(docs), 40), { thresholds: [0.3, 0.6] });
+  });
+
+  test("substrings across string boundaries, at the ends, and longer than the wasm search takes", async () => {
+    const docs = ["ab", "cd", "", "abcd", "a", "b", "xabcdabcd", "dc", "ñandú", "abababab", "a".repeat(1500), "b".repeat(9), "ab".repeat(40)];
+    await check(docs, { includeMatches: true, ...EXTENDED }, ["'bc", "'a", "'d", "'abcd", "'cdab", "'ñ", "'ú", "!'a", "'bb !a", "'aba", "'ab 'ba", `'${"a".repeat(1100)}`, `!${"a".repeat(1100)}`, `'${"ab".repeat(40)}`], { thresholds: [0, 0.4] });
+  });
+
+  test("large candidate lists (driver choice, scans of a few strings)", async () => {
+    const r = rng(99), docs = Array.from({ length: 1500 }, (_, i) => `${i % 5 === 0 ? "zebra" : "the"} ${randomText(r, 1, 4)}`);
+    await check(docs, { includeMatches: true, ...EXTENDED }, ["^the ring", "^zebra 'ring", "^zebra 'ring !hobbit$", "^the lord", "^zebra hary", "'the hary !x", "^the 'lord !hobbit", "the$ 'harry", "^the 'a | 'zzz", "'x ^the | ^zebra potter", "'hobbit zebra", "^the lord hary", "^the ring hobbit !x", "^zebra lord potter", "hary poter | ^the lrod ring"], { thresholds: [0.2, 0.5] });
+  });
+
+  test("takes precedence over token search", async () => {
+    const r = rng(97), docs = randomDocs(r, 250);
+    await check(docs, { keys: KEYS, ...EXTENDED, useTokenSearch: true }, [...queries(r, objectStrings(docs), 30), "lord rings"], { thresholds: [0.3] });
+  });
+
+  test("collection changes", async () => {
+    const r = rng(98), docs = randomDocs(r, 120), options = { keys: KEYS, ...EXTENDED };
+    const ff = await Fuseter.create(docs, { ...options, includeScore: true }), fuse = fuseFor([...docs], options);
+    for (const [change, args] of [["add", [{ title: "the lord of the rings", author: "Tolkien" }]], ["removeAt", [3]], ["remove", [(d, i) => i % 5 === 0]]]) {
+      ff[change](...args); fuse[change](...args);
+      for (const q of ["'lord !rings", "^tolkien | =harry", "!the"]) assert.equal(compare(ff.search(q), fuse.search(q)), null, `${change} ${q}`);
     }
   });
 });

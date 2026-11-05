@@ -11,6 +11,7 @@ const targets = [
   { name: "simd-transposition", source: "zig/simd7d.zig", flags: ["-mcpu=generic+simd128"] },   // loaded on demand, only for typing.transposition
   { name: "simd-weighted", source: "zig/simd7w.zig", flags: ["-mcpu=generic+simd128"] },   // loaded on demand, only for typing.firstLetter
   { name: "simd-weighted-transposition", source: "zig/simd7wd.zig", flags: ["-mcpu=generic+simd128"] },
+  { name: "extended", source: "zig/extended.zig", flags: ["-mcpu=generic+simd128"] },   // loaded on demand, only for useExtendedSearch
 ];
 
 mkdirSync(root + "wasm", { recursive: true });   // wasm/ is not committed

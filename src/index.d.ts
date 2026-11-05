@@ -63,6 +63,12 @@ export interface FuseterOptions {
    */
   getFn?: (doc: any, path: string[]) => unknown;
   /**
+   * Fuse's extended search syntax. The query is groups separated by `|` (`\|` is a literal bar); a group matches when all its space-separated terms do, and the
+   * first matching group decides the score. A term is a fuzzy pattern, or: `=x` exact, `'x` includes, `^x` prefix, `x$` suffix, `!x` not included, `!^x` not a prefix,
+   * `!x$` not a suffix; double quotes (`"x y"`, `^"x y"`) allow spaces. Takes precedence over `useTokenSearch`. Default false.
+   */
+  useExtendedSearch?: boolean;
+  /**
    * Fuse's token search: the query is split into terms, each is searched on its own, and the scores of the terms that match are combined weighted by
    * their rarity in the collection (idf), so a rare term counts more than "the". Default false.
    */

@@ -1,4 +1,6 @@
-import { kmaxFor } from "./kernel-js.mjs";
+import { jsDenseState } from "./dense.mjs";
+import { DRIVERS, createStringMatchers, isInverse, parseExtended } from "./extended.mjs";
+import { jsScanner, kmaxFor } from "./kernel-js.mjs";
 import { subRecord } from "./fuse-index.mjs";
 import { locateInPlace } from "./located.mjs";
 import { createMatcher, createRangeFinder, createSlotReader, equalsPattern, groupByLength } from "./matches.mjs";
@@ -27,8 +29,8 @@ const fuseMatch = ({ indices, value, keyDef, refIndex }) => {
   return match;
 };
 
-export function createSearcher(index, scanner, { threshold: defaultThreshold, ignoreFieldNorm, includeScore, includeMatches, indicesIn, highlighting, normalize, typing, shouldSort, sortFn: givenSortFn, minMatchCharLength: minLength, located, useTokenSearch, tokenize, tokenMatch }) {
-  const { docs, K, nDocs, weights, norms, present, keyless, keys, corpus } = index;
+export function createSearcher(index, scanner, { threshold: defaultThreshold, ignoreFieldNorm, includeScore, includeMatches, indicesIn, highlighting, normalize, typing, shouldSort, sortFn: givenSortFn, minMatchCharLength: minLength, located, useExtendedSearch, useTokenSearch, tokenize, tokenMatch }) {
+  const { docs, K, nDocs, nStr, weights, norms, present, keyless, keys, corpus } = index;
   const exactScore = keyless ? 0 : Number.EPSILON;
   const sortFn = shouldSort && givenSortFn !== defaultSortFn ? givenSortFn : null;
   const ranked = shouldSort && !sortFn && scanner.sortHits;   // the scanner sorts the hits by position
@@ -36,7 +38,9 @@ export function createSearcher(index, scanner, { threshold: defaultThreshold, ig
   let merged = null, matched = null;   // chunked patterns only
   let byLength = null;
   let frequencies = null;   // token search only
+  let extended = null;      // extended search only: the arrays of extendedScores, made on first use
   const tokenizer = useTokenSearch ? createTokenizer(tokenize, normalize) : null;
+  const stringMatchers = useExtendedSearch ? createStringMatchers(corpus, scanner.extendedWasm) : null;
   const slotsOf = createSlotReader(index), transposition = typing.transposition;
   const locate = located && locateInPlace(corpus, located, scanner.out);
   const matcher = includeMatches ? createMatcher(index, { slotsOf, transposition, minLength, normalize, original: indicesIn === "original", highlighting, located }) : null;
@@ -112,6 +116,25 @@ export function createSearcher(index, scanner, { threshold: defaultThreshold, ig
     return scores;
   }
 
+  // Thins out the strings cand[0..count) of a sparse extended search by a fuzzy term, adding the scores of those that match to `sum`, and returns how many are left;
+  // -1 when scanning them all is cheaper (or the pattern is not a plain one: more than one chunk, a typing rule, location scoring, minMatchCharLength).
+  // The simd tier does this in wasm up to a number of strings it says (subsetMax), the others in js, always.
+  let subsetScanner = null;
+  function narrowByFuzzy({ q, chunks, kmax, rule }, count) {
+    if (count > (scanner.subsetMax ?? Infinity) || chunks.length > 1 || rule || located || finder) return -1;
+    subsetScanner ??= scanner.extendedWasm?.subset ?? (scanner.scanSubset ? scanner : jsScanner(corpus, { transposition: typing.transposition }));
+    subsetScanner.prep(q);
+    if (subsetScanner.narrowFuzzy) return subsetScanner.narrowFuzzy(q.length, kmax, count);
+    const { cand, sum } = stringMatchers, found = subsetScanner.scanSubset(q.length, kmax, cand, count);
+    let kept = 0;
+    for (let i = 0; i < count; i++) {
+      const s = cand[i];
+      if (equalsPattern(corpus, s, q)) found[s] = 0;
+      if (found[s] >= 0) { cand[kept++] = s; sum[s] += found[s]; }
+    }
+    return kept;
+  }
+
   // One plan per term of the query, with the idf weight Fuse gives the term (rarer terms count more).
   function tokenPlans(query, threshold) {
     frequencies ??= documentFrequencies(index, tokenizer);
@@ -138,10 +161,136 @@ export function createSearcher(index, scanner, { threshold: defaultThreshold, ig
     return tokens.finish(maxScore, requireAll ? plans.length : 0);
   }
 
+  // The extended query as groups of terms { type, pattern }; a fuzzy term also has the plan of its pattern, and the number of its group.
+  function extendedGroups(query, threshold) {
+    return parseExtended(normalize(query)).map((terms, group) => terms.map(term => term.type === "fuzzy" ? { ...term, plan: { ...planFor(term.pattern, threshold), group } } : term));
+  }
+
+  // The scores of several patterns of an extended search scanned in a few passes (a Map from pattern to scores), when the scanner can and they are short; else null.
+  function scanTogether(plans) {
+    const batch = located || finder ? null : scanner.scanMany?.(plans.filter(plan => plan.chunks.length === 1 && !plan.rule));
+    if (batch) for (const [q, scores] of batch) settleExact(scores, q);
+    return batch;
+  }
+
+  // Fuse's extended score of every string: the first OR group whose terms all match decides, the score is the mean of their scores (-1: no group matches).
+  // Also records which group matched (`extended.dense.group`) and whether one of its matching terms was an inverse operator (`extended.dense.inverse`).
+  // A document with an inverse match in one key and no match in another is dropped.
+  // When every group has a term that matches few strings (DRIVERS), only the strings of those lists are looked at; otherwise every string is.
+  // `extended.docs` is then the ascending list of documents that can have a hit (null: all of them).
+  function extendedScores(groups) {
+    extended ??= {
+      dense: scanner.extendedWasm?.dense ?? jsDenseState(nStr, present),
+      touched: new Int32Array(nStr), touchedCount: -1, docList: new Int32Array(nDocs), docs: null, docCount: 0,
+    };
+    const sparse = groups.every(terms => !terms.length || terms.some(({ type }) => DRIVERS.has(type)));
+    if (sparse) sparseScores(groups); else denseScores(groups);
+    const { scores, group, inverse } = extended.dense;
+    if (!keyless && groups.some(terms => terms.some(({ type }) => isInverse(type)))) {
+      const { docs, docCount } = extended;
+      for (let i = 0; i < docCount; i++) {
+        const d = docs ? docs[i] : i;
+        let hasInverse = false, keyFailed = false;
+        for (const { base, width } of keys) {
+          let first = base;
+          while (first < base + width && group[d * K + first] < 0) first++;
+          if (first === base + width) keyFailed = true; else if (inverse[d * K + first]) hasInverse = true;
+        }
+        if (hasInverse && keyFailed) scores.fill(-1, d * K, d * K + K);
+      }
+    }
+    return scores;
+  }
+
+  // Every string is scored.
+  function denseScores(groups) {
+    const { dense } = extended;
+    const batch = scanTogether(groups.flatMap(terms => terms.flatMap(term => term.plan ?? [])));
+    let initial = true;
+    groups.forEach((terms, g) => {
+      if (!terms.length) return;
+      const fuzzy = terms.some(term => term.plan);
+      dense.begin(fuzzy);
+      for (const { type, pattern, plan } of terms) {
+        if (plan) dense.fuzzy(batch?.get(plan.q) ?? patternScores(plan));
+        else dense.term(stringMatchers.mark(type, pattern), isInverse(type) ? 2 : 0);
+      }
+      dense.finish(g, terms.length, fuzzy, initial);
+      initial = false;
+    });
+    extended.touchedCount = -1; extended.docs = null; extended.docCount = nDocs;
+  }
+
+  const DRIVER_BOUND = 200, SELECTIVE_INCLUDE = 3;
+  function driverOf(matchers) {
+    const drivers = matchers.filter(({ type }) => DRIVERS.has(type));
+    let anchored = null, include = null, least = Infinity;
+    for (const term of drivers) {
+      if (term.type === "include") { if (!include || term.pattern.length > include.pattern.length) include = term; continue; }
+      const bound = stringMatchers.bound(term.type, term.pattern);
+      if (bound < least) { least = bound; anchored = term; }
+    }
+    return anchored && (least <= DRIVER_BOUND || !include || include.pattern.length < SELECTIVE_INCLUDE) ? anchored : include;
+  }
+
+  const scanCost = type => type === "include" || type === "inverse-exact" ? 1 : 0;   // the others only look at the ends of a string
+
+  // The strings a group matches start as the list of its driver term (the cheapest one that matches few strings); its other terms thin the list out,
+  // the exact-style ones first so that a fuzzy scan is skipped once nothing is left. `bits` is 1 for a string where an inverse term matched.
+  function sparseScores(groups) {
+    const { cand, bits, sum } = stringMatchers, { touched, docList } = extended, { scores, group, inverse } = extended.dense;
+    if (extended.touchedCount < 0) { scores.fill(-1); group.fill(-1); inverse.fill(0); }
+    else for (let i = 0; i < extended.touchedCount; i++) { const s = touched[i]; scores[s] = -1; group[s] = -1; inverse[s] = 0; }
+    let count = 0, contributing = 0;
+    groups.forEach((terms, g) => {
+      if (!terms.length) return;
+      const matchers = terms.filter(term => !term.plan), fuzzy = terms.filter(term => term.plan);
+      const driver = driverOf(matchers);
+      let m = stringMatchers.drive(driver.type, driver.pattern);
+      stringMatchers.begin(m);
+      for (const term of matchers.sort((a, b) => scanCost(a.type) - scanCost(b.type))) {
+        if (term === driver || !m) continue;
+        m = stringMatchers.narrow(term.type, term.pattern, m);
+      }
+      let batch = null;
+      for (let k = 0; k < fuzzy.length && m; k++) {
+        const { plan } = fuzzy[k], narrowed = narrowByFuzzy(plan, m);
+        if (narrowed >= 0) { m = narrowed; continue; }
+        batch ??= scanTogether(fuzzy.slice(k).map(term => term.plan));
+        const found = batch?.get(plan.q) ?? patternScores(plan);
+        let kept = 0;
+        for (let i = 0; i < m; i++) { const s = cand[i]; if (found[s] >= 0) { cand[kept++] = s; sum[s] += found[s]; } }
+        m = kept;
+      }
+      const before = count;
+      for (let i = 0; i < m; i++) {
+        const s = cand[i];
+        if (group[s] >= 0) continue;
+        scores[s] = fuzzy.length ? sum[s] / terms.length : 0; group[s] = g; inverse[s] = bits[s]; touched[count++] = s;
+      }
+      if (count > before) contributing++;
+    });
+    extended.touchedCount = count;
+    if (contributing > 1) touched.subarray(0, count).sort();
+    let nd = 0;
+    for (let i = 0; i < count; i++) { const d = (touched[i] / K) | 0; if (nd === 0 || docList[nd - 1] !== d) docList[nd++] = d; }
+    extended.docs = docList; extended.docCount = nd;
+  }
+
+  // What the matcher needs of an extended search: the plans of the matched group per string, and the ranges of the exact-style terms of that group.
+  const extendedMatching = groups => ({
+    applies: (s, plan) => extended.dense.group[s] === plan.group,
+    ranges(s) {
+      const g = extended.dense.group[s];
+      return g < 0 ? [] : groups[g].flatMap(({ type, pattern, plan }) => plan ? [] : stringMatchers.ranges(type, pattern, s));
+    },
+  });
+
   // Scores every document that matched in at least one slot and returns the hit count; ids/scores land in hitIds/docScore.
-  function combine(scores) {
+  function combine(scores, list = null, count = nDocs) {
     let m = 0;
-    for (let d = 0; d < nDocs; d++) {
+    for (let i = 0; i < count; i++) {
+      const d = list ? list[i] : i;
       let total = 1, any = false;
       for (let k = 0; k < K; k++) {
         const s = d * K + k;
@@ -191,8 +340,8 @@ export function createSearcher(index, scanner, { threshold: defaultThreshold, ig
   }
 
   // With a sortFn, the hits are sorted as Fuse's result records (the order of ties is by document), then cut to the limit.
-  function sortCustom(m, scores, cap, plans) {
-    const ids = Array.from(hitIds.subarray(0, m)), found = matcher?.(ids, plans);
+  function sortCustom(m, scores, cap, plans, matching) {
+    const ids = Array.from(hitIds.subarray(0, m)), found = matcher?.(ids, plans, matching);
     const results = ids.map((d, i) => {
       const slots = slotsOf(d);
       const matches = slots.filter(slot => scores[slot.s] >= 0).map(({ s, keyDef, value, refIndex }) => {
@@ -201,7 +350,7 @@ export function createSearcher(index, scanner, { threshold: defaultThreshold, ig
         match.value = value;
         if (refIndex !== undefined) match.idx = refIndex;
         match.norm = norms[s]; match.indices = found?.[i].find(slot => slot.s === s)?.indices;
-        if (keyDef) match.hasInverse = undefined;
+        if (keyDef) match.hasInverse = extended?.dense.inverse[s] ? true : undefined;
         return match;
       });
       return { idx: d, item: indexRecord(d, slots), matches, score: docScore[d] };
@@ -223,13 +372,15 @@ export function createSearcher(index, scanner, { threshold: defaultThreshold, ig
     }
     const cap = typeof limit === "number" && limit > 0 ? Math.ceil(limit) : limit === 0 ? 0 : -1;
     if (cap === 0) return [];
-    const plans = useTokenSearch ? tokenPlans(query, threshold) : [planFor(normalize(query), threshold)];
-    if (useTokenSearch ? !plans.length : !plans[0].q.length) return [];
-    const [{ q, chunks, kmax, rule, denom }] = plans;
+    const groups = useExtendedSearch ? extendedGroups(query, threshold) : null;
+    const plans = groups ? groups.flat().flatMap(term => term.plan ?? []) : useTokenSearch ? tokenPlans(query, threshold) : [planFor(normalize(query), threshold)];
+    if (groups ? !groups.some(terms => terms.length) : useTokenSearch ? !plans.length : !plans[0].q.length) return [];
+    const plain = !groups && !useTokenSearch;
+    const { q, chunks, kmax, rule, denom } = plain ? plans[0] : {};
     let t0 = performance.now(), t1, t2, res;
 
-    let custom = false;
-    if (!useTokenSearch && chunks.length === 1 && scanner.combineSort && simpleRanking) {
+    let custom = false, matching = null;
+    if (plain && chunks.length === 1 && scanner.combineSort && simpleRanking) {
       scanner.prep(q); scanner.scan(q.length, kmax, rule);
       t1 = performance.now();
       const { hits, ids, scores } = scanner.combineSort(q.length, denom, kmax, cap > 0 && cap < nDocs ? cap : 0);
@@ -238,10 +389,11 @@ export function createSearcher(index, scanner, { threshold: defaultThreshold, ig
       res = new Array(count);
       for (let i = 0; i < count; i++) res[i] = result(ids[i], scores[i]);
     } else {
-      const scores = useTokenSearch ? tokenScores(plans) : patternScores(plans[0]);
+      const scores = groups ? extendedScores(groups) : useTokenSearch ? tokenScores(plans) : patternScores(plans[0]);
+      matching = groups && extendedMatching(groups);
       t1 = performance.now();
-      const m = combine(scores);
-      if (sortFn) { custom = true; res = sortCustom(m, scores, cap, plans); t2 = t1; }
+      const m = groups ? combine(scores, extended.docs, extended.docCount) : combine(scores);
+      if (sortFn) { custom = true; res = sortCustom(m, scores, cap, plans, matching); t2 = t1; }
       else if (ranked) {
         const { ids, scores: keys } = scanner.sortHits(m, cap > 0 && cap < nDocs ? cap : 0);
         const count = cap > 0 && m > cap ? cap : m;
@@ -256,7 +408,7 @@ export function createSearcher(index, scanner, { threshold: defaultThreshold, ig
       }
     }
     if (matcher && !custom) {
-      const matches = matcher(res.map(r => r.refIndex), plans);
+      const matches = matcher(res.map(r => r.refIndex), plans, matching);
       for (let i = 0; i < res.length; i++) res[i].matches = matches[i].map(fuseMatch);
     }
     timings.scan = t1 - t0; timings.combine = t2 - t1; timings.format = performance.now() - t2;

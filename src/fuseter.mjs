@@ -19,15 +19,13 @@ const CONFIG = {
   location: 0, distance: 100, findAllMatches: false, ignoreLocation: true, useExtendedSearch: false, useTokenSearch: false, tokenize: undefined, tokenMatch: "any",
   typing: null,   // opt-in heuristics, not Fuse compatible (see typing.mjs)
 };
-const UNSUPPORTED = { useExtendedSearch: false };
 
-// Token search keeps ignoreLocation on for its terms, as Fuse does.
-const needsLocated = ({ ignoreLocation, useTokenSearch }) => !ignoreLocation && !useTokenSearch;
+// Token search keeps ignoreLocation on for its terms, as Fuse does; extended search, which takes precedence over it, uses it for its fuzzy terms.
+const needsLocated = ({ ignoreLocation, useExtendedSearch, useTokenSearch }) => !ignoreLocation && (useExtendedSearch || !useTokenSearch);
 
 function resolveOptions(options) {
   for (const name of Object.keys(options)) if (!(name in CONFIG)) throw new TypeError(`fuseter: unknown option '${name}'`);
   const resolved = { ...CONFIG, ...options };
-  for (const [name, only] of Object.entries(UNSUPPORTED)) if (resolved[name] !== only) throw new TypeError(`fuseter: option '${name}' is not supported (only ${JSON.stringify(only)})`);
   for (const name of ["sortFn", "getFn"]) if (resolved[name] != null && typeof resolved[name] !== "function") throw new TypeError(`fuseter: '${name}' must be a function`);
   if (typeof resolved.minMatchCharLength !== "number") throw new TypeError("fuseter: minMatchCharLength must be a number");
   checkTokenize(resolved.tokenize);
@@ -54,9 +52,9 @@ export function defineFuseter(backends, defaultBackend) {
     // runtime: { backend: 'simd' | 'wasm' | 'js', fallback: 'js' (default) | 'wasm' | 'throw', index: a prebuilt index (createIndex, parseIndex) }
     static async create(docs, options = {}, { backend = defaultBackend, fallback = "js", index } = {}) {
       const candidates = plan(backend, fallback), failures = [];
-      const { transposition, firstLetter } = resolveTyping(resolveOptions(options).typing);
+      const resolved = resolveOptions(options), { transposition, firstLetter } = resolveTyping(resolved.typing);
       for (const tier of candidates) {
-        try { await backends[tier].load({ transposition, weighted: Boolean(firstLetter) }); } catch (e) { failures.push([tier, e]); }
+        try { await backends[tier].load({ transposition, weighted: Boolean(firstLetter), extended: Boolean(resolved.useExtendedSearch) }); } catch (e) { failures.push([tier, e]); }
       }
       return new Fuseter(docs, options, { backend, candidates, failures }, index);
     }
@@ -130,7 +128,7 @@ export function defineFuseter(backends, defaultBackend) {
       for (const tier of this._candidates) {
         if (failures.some(([t]) => t === tier)) continue;
         try {
-          const scanner = backends[tier].create(index, { ignoreFieldNorm: o.ignoreFieldNorm, transposition: this._typing.transposition, useTokenSearch: o.useTokenSearch });
+          const scanner = backends[tier].create(index, { ignoreFieldNorm: o.ignoreFieldNorm, transposition: this._typing.transposition, useTokenSearch: o.useTokenSearch, useExtendedSearch: o.useExtendedSearch });
           const searcher = createSearcher(index, scanner, { ...o, located, highlighting: resolveHighlighting(o.highlighting), typing: this._typing, normalize: textNormalizer(o) });
           this._search = searcher.search;
           this.timings = searcher.timings;

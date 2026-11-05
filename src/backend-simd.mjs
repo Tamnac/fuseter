@@ -1,4 +1,5 @@
 import { lazyModule, allocate, simdSupported, tokenSizes, wasmTokenAccumulator } from "./wasm-util.mjs";
+import { createExtendedWasm, extendedModule } from "./extended-wasm.mjs";
 import { groupByLength } from "./matches.mjs";
 import simdBase64 from "./wasm/simd.mjs";
 
@@ -60,14 +61,14 @@ export const simdBackend = {
   name: "simd",
   async load(options = {}) {
     if (!simdSupported()) throw new Error("WebAssembly SIMD is not supported");
-    await moduleFor(options).load();
+    await Promise.all([moduleFor(options).load(), options.extended && extendedModule.load()]);
   },
-  create(index, { ignoreFieldNorm, transposition, useTokenSearch }) {
+  create(index, { ignoreFieldNorm, transposition, useTokenSearch, useExtendedSearch }) {
     const { corpus, K, nDocs, weights, keyless } = index, n = corpus.n, nStr = index.nStr, weighted = Boolean(corpus.starts);
     const { exports: ex } = moduleFor({ transposition, weighted }).instantiate(), mem = ex.memory;
     const classes = normClasses(index), nn = classes ? Math.max(1, classes.values.length) : 0;
     const { order } = groupByLength(corpus), T4 = transpose(corpus, order, 4), T8 = transpose(corpus, order, 8);
-    const many = useTokenSearch && ex.scan_packed ? MAX_TERMS : 0;
+    const many = (useTokenSearch || useExtendedSearch) && ex.scan_packed ? MAX_TERMS : 0;
     const P = allocate(mem, {
       mtab: many ? 65536 * 2 : 0, mlen: many * 4, mk: many * 4, mout: many * n * 8,
       d4: T4.t.byteLength, s4: T4.flags?.byteLength ?? 0, g4: T4.goff.byteLength, d8: T8.t.byteLength, s8: T8.flags?.byteLength ?? 0, g8: T8.goff.byteLength,
@@ -106,6 +107,8 @@ export const simdBackend = {
     const packLens = new Uint32Array(mem.buffer, P.mlen, MAX_FIELDS), packKmax = new Uint32Array(mem.buffer, P.mk, MAX_FIELDS);
     const scanner = {
       out,
+      subsetMax: Math.floor(nStr / 4),   // strings: beyond this the simd scan of all of them is faster than the scalar scan of the list
+      extendedWasm: useExtendedSearch ? createExtendedWasm(index, { transposition }) : undefined,
       tokens: wasmTokenAccumulator(ex, mem, P, { nStr, K, nDocs, out }),
       prep(pattern) {
         for (const c of previous) { t32[c] = 0; t16[c] = 0; }
