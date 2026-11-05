@@ -205,9 +205,11 @@ describe("limit and query handling", () => {
     assert.deepEqual(ff.search("", { limit: 1 }), [{ item: docs[0], refIndex: 0 }]);
   });
 
-  test("non-string queries are rejected", async () => {
+  test("queries that are neither strings nor logical queries are rejected", async () => {
     const ff = await Fuseter.create([{ a: "abc" }], { keys: ["a"] });
-    assert.throws(() => ff.search({ a: "abc" }), TypeError);
+    for (const query of [null, 5, undefined, true]) assert.throws(() => ff.search(query), TypeError);
+    assert.throws(() => ff.search({ a: 5 }), TypeError);
+    assert.throws(() => ff.search({ $and: [{ a: {} }] }), TypeError);
   });
 
   test("score is omitted unless includeScore", async () => {
@@ -408,5 +410,81 @@ describe("extended search matches Fuse", () => {
       ff[change](...args); fuse[change](...args);
       for (const q of ["'lord !rings", "^tolkien | =harry", "!the"]) assert.equal(compare(ff.search(q), fuse.search(q)), null, `${change} ${q}`);
     }
+  });
+});
+
+describe("logical queries match Fuse", () => {
+  // Leaves cut from the documents' own text, combined at random into $and / $or trees and plain key objects.
+  const queries = (r, strings, count, keys) => {
+    const piece = () => { const s = r.pick(strings); return r.int(3) ? edit(r, s.split(/s+/)[0] ?? "") || "a" : s.slice(0, 1 + r.int(8)) || "a"; };
+    const leaf = () => {
+      const roll = r.int(6);
+      if (roll === 0) return piece();
+      if (roll === 1) return { $path: r.pick(keys), $val: piece() };
+      if (roll === 2) return { $path: r.pick(keys).split("."), $val: piece() };
+      return { [r.pick(keys)]: piece() };
+    };
+    const node = depth => {
+      const roll = r.int(depth > 2 ? 1 : 3);
+      if (roll === 0) return leaf();
+      return { [r.int(2) ? "$and" : "$or"]: Array.from({ length: r.int(4) }, () => node(depth + 1)) };
+    };
+    const out = [{ title: "lord", author: "tolkien" }, { $and: [{ title: "lord" }, { $or: [{ author: "tolkien" }, "ring"] }] }, { $or: [] }, { $and: [] }, {}, "lord",
+      { $or: [{ title: "lord" }, { title: "lord" }] }, { $and: [{ title: "the" }, { title: "the" }] }, { nothere: "lord" }, { title: "" }, { $or: [{ title: "x" }], $and: [{ author: "a" }] }];
+    while (out.length < count) out.push({ [r.int(2) ? "$and" : "$or"]: Array.from({ length: 1 + r.int(3) }, () => node(1)) });
+    return out;
+  };
+  const KEYS = [{ name: "title", weight: 3 }, { name: "author", weight: 2 }, "tags", "meta.note"], PATHS = ["title", "author", "tags", "meta.note", "missing"];
+  const strings = docs => stringsOf(docs, ["title", "author"]);
+
+  test("object docs, weighted keys, array values", async () => {
+    const r = rng(111), docs = randomDocs(r, 250);
+    await check(docs, { keys: KEYS }, queries(r, strings(docs), 100, PATHS), { thresholds: [0.2, 0.4, 0.7] });
+  });
+
+  test("includeMatches, shouldSort: false, sortFn, no field norm", async () => {
+    const r = rng(112), docs = randomDocs(r, 250), qs = queries(r, strings(docs), 60, PATHS), thresholds = [0.3, 0.6];
+    await check(docs, { keys: KEYS, includeMatches: true }, qs, { thresholds });
+    await check(docs, { keys: KEYS, includeMatches: true, shouldSort: false }, qs, { thresholds });
+    await check(docs, { keys: KEYS, includeMatches: true, sortFn: (a, b) => b.score - a.score }, qs, { thresholds });
+    await check(docs, { keys: KEYS, ignoreFieldNorm: true, minMatchCharLength: 3, includeMatches: true }, qs, { thresholds });
+    await check(docs, { keys: KEYS, isCaseSensitive: true, ignoreDiacritics: true, includeMatches: true }, qs, { thresholds });
+  });
+
+  test("location scoring", async () => {
+    const r = rng(113), docs = randomDocs(r, 200);
+    await check(docs, { keys: KEYS, ignoreLocation: false, includeMatches: true, location: 3, distance: 40 }, queries(r, strings(docs), 40, PATHS), { thresholds: [0.3, 0.6] });
+  });
+
+  test("extended search", async () => {
+    const r = rng(114), docs = randomDocs(r, 250), qs = queries(r, strings(docs), 60, PATHS).concat([
+      { title: "^the | 'lord" }, { $and: [{ title: "!hobbit" }, { author: "'king" }] }, { $or: ["=hobbit", { tags: "!^the lord$" }] }, { author: "!a" }]);
+    await check(docs, { keys: KEYS, useExtendedSearch: true, includeMatches: true }, qs, { thresholds: [0.2, 0.5] });
+    await check(docs, { keys: KEYS, useExtendedSearch: true, sortFn: (a, b) => b.score - a.score, includeMatches: true }, qs, { thresholds: [0.3] });
+  });
+
+  // Fuse 7.5 throws on logical queries with token search, so a leaf is compared with the plain query it stands for. The documents of tokenMatch "all" are not dropped.
+  test("token search", async () => {
+    const r = rng(115), docs = randomDocs(r, 250);
+    for (const backend of BACKENDS) {
+      const options = { keys: ["title"], useTokenSearch: true, includeScore: true, includeMatches: true, threshold: 0.4 };
+      const ff = await Fuseter.create(docs, options, { backend, fallback: "throw" });
+      const all = await Fuseter.create(docs, { ...options, tokenMatch: "all" }, { backend, fallback: "throw" });
+      for (const query of ["lord rings", "the of", "harry potter prisoner", "zzz"]) {
+        assert.deepEqual(ff.search({ title: query }), ff.search(query));
+        assert.deepEqual(ff.search({ $or: [{ $path: "title", $val: query }] }), ff.search(query));
+        assert.deepEqual(all.search({ title: query }), ff.search(query));
+      }
+    }
+  });
+
+  test("string collections have no logical matches", async () => {
+    const r = rng(116), docs = Array.from({ length: 50 }, () => randomText(r, 1, 4));
+    await check(docs, {}, [{ $or: ["lord", "ring"] }, "lord"], { thresholds: [0.4] });
+  });
+
+  test("limits", async () => {
+    const r = rng(117), docs = randomDocs(r, 100);
+    await check(docs, { keys: KEYS }, [{ $or: [{ title: "the" }, { author: "a" }] }], { thresholds: [0.4], limits: [undefined, 0, 1, 7, 1000] });
   });
 });

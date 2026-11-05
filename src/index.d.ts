@@ -159,6 +159,36 @@ export interface FuseterMatch {
   refIndex?: number;
 }
 
+/**
+ * Fuse's logical query: `{ $and: [...] }` and `{ $or: [...] }` of strings (searched in every key), `{ key: "pattern" }` and `{ $path: "key" | ["a", "b"], $val: "pattern" }`.
+ * An object with several keys is the AND of its entries. Collections of strings have no logical matches.
+ */
+export type LogicalQuery = { $and: LogicalQuery[] } | { $or: LogicalQuery[] } | { [key: string]: string } | { $path: string | string[]; $val: string } | string;
+
+/** What a searcher returns for one text, as in Fuse. `indices` (inclusive ranges) are reported as matches when present. */
+export interface SearcherResult {
+  isMatch: boolean;
+  /** 0 is a perfect match, 1 none. */
+  score: number;
+  indices?: [number, number][];
+  /** A match made by an inverse operator; a document with one in a key and no match in another is dropped from a plain query. */
+  hasInverse?: boolean;
+}
+
+export interface Searcher {
+  searchIn(text: string): SearcherResult;
+}
+
+/** A search plugin for Fuseter.use: a class whose instances compare the pattern with the texts. */
+export interface SearcherPlugin {
+  new (pattern: string, options: FuseterOptions): Searcher;
+  /** Whether the plugin searches for this pattern. */
+  condition(pattern: string, options: FuseterOptions): boolean;
+}
+
+/** A node of a parsed logical query: `keyId` is the key of the leaf (null: every key). */
+export type QueryNode = { operator: "$and" | "$or"; children: QueryNode[] } | { keyId: string | null; pattern: string; searcher?: Searcher };
+
 export interface FuseterResult<T> {
   item: T;
   refIndex: number;
@@ -175,6 +205,18 @@ export class Fuseter<T = unknown> {
   static createIndex(keys: readonly KeyDefinition[], docs: readonly unknown[], options?: Pick<FuseterOptions, "getFn" | "fieldNormWeight">): FuseterIndex;
   /** Fuse.parseIndex: the index from the parsed JSON of an index (made here or by Fuse). */
   static parseIndex(data: IndexLike): FuseterIndex;
+  /**
+   * Fuse.match: compares a pattern with a text. The options are a Fuseter's (the defaults of Fuseter.config, so ignoreLocation is on unless you turn it off).
+   * Extended search works but the result has no hasInverse; token search throws, as in Fuse.
+   */
+  static match(pattern: string, text: string, options?: FuseterOptions): SearcherResult;
+  /** Fuse.parseQuery: the tree of a logical query. With `auto: false` the leaves have no searcher. */
+  static parseQuery(query: Exclude<LogicalQuery, string>, options?: FuseterOptions, runtime?: { auto?: boolean }): QueryNode;
+  /**
+   * Fuse.use: registers search plugins for every instance (the first whose condition accepts a pattern searches for it).
+   * Plugins come after extended and token search, which take precedence when enabled.
+   */
+  static use(...plugins: SearcherPlugin[]): void;
   /** The defaults of new instances; changing them affects instances created afterwards. */
   static config: FuseterOptions;
   static readonly version: string;
@@ -186,7 +228,7 @@ export class Fuseter<T = unknown> {
   readonly size: number;
   /** Stage timings (ms) of the most recent search. */
   readonly timings: { scan: number; combine: number; format: number };
-  search(query: string, options?: SearchOptions): FuseterResult<T>[];
+  search(query: string | LogicalQuery, options?: SearchOptions): FuseterResult<T>[];
   /** Replaces the documents; `index` (made from them) is optional. */
   setCollection(docs: readonly T[], index?: IndexLike): this;
   /**

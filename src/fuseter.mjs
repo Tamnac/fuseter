@@ -1,6 +1,8 @@
 import { createIndex, indexFromBuilt, parseIndex, toIndex } from "./fuse-index.mjs";
 import { buildIndex, defaultGetFn } from "./index-build.mjs";
+import { leavesOf, parseLogical } from "./logical.mjs";
 import { resolveHighlighting } from "./matches.mjs";
+import { pluginFor, registerPlugins } from "./plugins.mjs";
 import { createSearcher, defaultSortFn } from "./search.mjs";
 import { textNormalizer } from "./text.mjs";
 import { checkTokenize, TOKEN_MATCH } from "./tokens.mjs";
@@ -10,6 +12,7 @@ import { VERSION } from "./version.mjs";
 const TIERS = ["simd", "wasm", "js"];   // fastest first
 const FALLBACKS = ["js", "wasm", "throw"];
 const INDICES_IN = ["normalized", "original"];
+const MATCH_TOKEN_SEARCH_UNSUPPORTED = "Fuseter.match does not support useTokenSearch: token search needs statistics of the whole collection. Use search() instead.";
 
 // The defaults of new instances (Fuseter.config). Unlike Fuse, ignoreLocation is on by default: location, distance and findAllMatches have no effect
 // while it is on (Fuse only widens the window of text it scans, which is the whole text anyway).
@@ -46,7 +49,20 @@ export function defineFuseter(backends, defaultBackend) {
     return TIERS.slice(TIERS.indexOf(backend), TIERS.indexOf(floor) + 1).filter(t => t in backends);
   }
 
-  return class Fuseter {
+  // Fuse's searcher for a pattern: the first plugin whose condition holds, otherwise one that compares the pattern with a single text (see match).
+  function searcherFor(pattern, options) {
+    const merged = { ...CONFIG, ...options }, Plugin = pluginFor(pattern, merged);
+    return Plugin ? new Plugin(pattern, merged) : { searchIn: text => matchText(pattern, text, merged) };
+  }
+
+  function matchText(pattern, text, options) {
+    const single = Fuseter.createSync([text], { ...options, keys: [], ignoreFieldNorm: true, includeScore: true });
+    const [hit] = single._searchPattern(pattern, { builtin: true });
+    if (!hit) return { isMatch: false, score: 1 };
+    return options.includeMatches ? { isMatch: true, score: hit.score, indices: hit.matches?.[0]?.indices ?? [] } : { isMatch: true, score: hit.score };
+  }
+
+  class Fuseter {
     // Rank-equivalent drop-in for `new Fuse(docs, options).search(query, { limit })` (ignoreLocation defaults to true here, false in Fuse).
     // With `typing` or `highlighting` the results no longer match Fuse's.
     // runtime: { backend: 'simd' | 'wasm' | 'js', fallback: 'js' (default) | 'wasm' | 'throw', index: a prebuilt index (createIndex, parseIndex) }
@@ -68,6 +84,28 @@ export function defineFuseter(backends, defaultBackend) {
     static parseIndex = parseIndex;
     static config = CONFIG;   // the defaults of new instances, like Fuse.config
     static version = VERSION;
+
+    // Fuse.match: compares one pattern with one text, giving { isMatch, score, indices? } (indices with includeMatches). The options are those of a Fuseter,
+    // so unlike Fuse's ignoreLocation is on by default. Extended search is supported, but its result has no hasInverse, and token search is not (as in Fuse).
+    static match(pattern, text, options) {
+      const merged = { ...CONFIG, ...options };
+      if (merged.useTokenSearch) throw new Error(MATCH_TOKEN_SEARCH_UNSUPPORTED);
+      return searcherFor(pattern, merged).searchIn(text);
+    }
+
+    // Fuse.parseQuery: the tree of a logical query, { operator, children } for  and  and { keyId, pattern, searcher } for a leaf (keyId is null for a string).
+    // With auto: false the leaves have no searcher; otherwise it has a searchIn(text) method that compares the leaf's pattern with a text.
+    static parseQuery(query, options, { auto = true } = {}) {
+      const tree = parseLogical(query);
+      if (auto) for (const leaf of leavesOf(tree)) leaf.searcher = searcherFor(leaf.pattern, options);
+      return tree;
+    }
+
+    // Fuse.use: registers search plugins for all instances, classes with static condition(pattern, options) and searchIn(text) (see SearcherPlugin in index.d.ts).
+    // A plugin is used for the queries whose pattern its condition accepts, unless extended or token search is on.
+    static use(...plugins) {
+      registerPlugins(plugins);
+    }
 
     constructor(docs, options, { backend, candidates, failures }, index) {
       this.options = resolveOptions(options);
@@ -129,8 +167,9 @@ export function defineFuseter(backends, defaultBackend) {
         if (failures.some(([t]) => t === tier)) continue;
         try {
           const scanner = backends[tier].create(index, { ignoreFieldNorm: o.ignoreFieldNorm, transposition: this._typing.transposition, useTokenSearch: o.useTokenSearch, useExtendedSearch: o.useExtendedSearch });
-          const searcher = createSearcher(index, scanner, { ...o, located, highlighting: resolveHighlighting(o.highlighting), typing: this._typing, normalize: textNormalizer(o) });
+          const searcher = createSearcher(index, scanner, { ...o, options: o, located, highlighting: resolveHighlighting(o.highlighting), typing: this._typing, normalize: textNormalizer(o) });
           this._search = searcher.search;
+          this._searchPattern = searcher.searchPattern;
           this.timings = searcher.timings;
           this.backend = tier;
           this.fallbackReason = failures.length ? failures[0][1] : null;
@@ -148,5 +187,6 @@ export function defineFuseter(backends, defaultBackend) {
       this._refresh();
       return this._search(query, searchOptions);
     }
-  };
+  }
+  return Fuseter;
 }

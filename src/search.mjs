@@ -3,7 +3,9 @@ import { DRIVERS, createStringMatchers, isInverse, parseExtended } from "./exten
 import { jsScanner, kmaxFor } from "./kernel-js.mjs";
 import { subRecord } from "./fuse-index.mjs";
 import { locateInPlace } from "./located.mjs";
+import { evaluateLogical, leavesOf, parseLogical } from "./logical.mjs";
 import { createMatcher, createRangeFinder, createSlotReader, equalsPattern, groupByLength } from "./matches.mjs";
+import { pluginFor } from "./plugins.mjs";
 import { createTokenizer, documentFrequencies, idfOf } from "./tokens.mjs";
 import { weightRule } from "./typing.mjs";
 
@@ -29,7 +31,7 @@ const fuseMatch = ({ indices, value, keyDef, refIndex }) => {
   return match;
 };
 
-export function createSearcher(index, scanner, { threshold: defaultThreshold, ignoreFieldNorm, includeScore, includeMatches, indicesIn, highlighting, normalize, typing, shouldSort, sortFn: givenSortFn, minMatchCharLength: minLength, located, useExtendedSearch, useTokenSearch, tokenize, tokenMatch }) {
+export function createSearcher(index, scanner, { options, threshold: defaultThreshold, ignoreFieldNorm, includeScore, includeMatches, indicesIn, highlighting, normalize, typing, shouldSort, sortFn: givenSortFn, minMatchCharLength: minLength, located, useExtendedSearch, useTokenSearch, tokenize, tokenMatch }) {
   const { docs, K, nDocs, nStr, weights, norms, present, keyless, keys, corpus } = index;
   const exactScore = keyless ? 0 : Number.EPSILON;
   const sortFn = shouldSort && givenSortFn !== defaultSortFn ? givenSortFn : null;
@@ -142,9 +144,9 @@ export function createSearcher(index, scanner, { threshold: defaultThreshold, ig
   }
 
   // Fuse's token score of every string: the idf-weighted mean of the terms' scores, 1 - sum(idf * (1 - score)) / sum(idf), over the terms that match
-  // (-1 when none does). With tokenMatch "all", the documents whose strings together miss a term are dropped.
-  function tokenScores(plans) {
-    const requireAll = tokenMatch === "all", { tokens } = scanner, lastUse = new Map(plans.map((plan, i) => [plan.q, i])), kept = new Map();
+  // (-1 when none does). With tokenMatch "all", the documents whose strings together miss a term are dropped (not in a logical query, as in Fuse).
+  function tokenScores(plans, requireAll = tokenMatch === "all") {
+    const { tokens } = scanner, lastUse = new Map(plans.map((plan, i) => [plan.q, i])), kept = new Map();
     const batch = finder ? null : scanner.scanMany?.(plans.filter(plan => plan.q.length && plan.chunks.length === 1 && !plan.rule));
     if (batch) for (const [q, scores] of batch) settleExact(scores, q);
     tokens.begin();
@@ -175,10 +177,10 @@ export function createSearcher(index, scanner, { threshold: defaultThreshold, ig
 
   // Fuse's extended score of every string: the first OR group whose terms all match decides, the score is the mean of their scores (-1: no group matches).
   // Also records which group matched (`extended.dense.group`) and whether one of its matching terms was an inverse operator (`extended.dense.inverse`).
-  // A document with an inverse match in one key and no match in another is dropped.
+  // A document with an inverse match in one key and no match in another is dropped (not in a logical query, as in Fuse).
   // When every group has a term that matches few strings (DRIVERS), only the strings of those lists are looked at; otherwise every string is.
   // `extended.docs` is then the ascending list of documents that can have a hit (null: all of them).
-  function extendedScores(groups) {
+  function extendedScores(groups, dropInverse = true) {
     extended ??= {
       dense: scanner.extendedWasm?.dense ?? jsDenseState(nStr, present),
       touched: new Int32Array(nStr), touchedCount: -1, docList: new Int32Array(nDocs), docs: null, docCount: 0,
@@ -186,7 +188,7 @@ export function createSearcher(index, scanner, { threshold: defaultThreshold, ig
     const sparse = groups.every(terms => !terms.length || terms.some(({ type }) => DRIVERS.has(type)));
     if (sparse) sparseScores(groups); else denseScores(groups);
     const { scores, group, inverse } = extended.dense;
-    if (!keyless && groups.some(terms => terms.some(({ type }) => isInverse(type)))) {
+    if (dropInverse && !keyless && groups.some(terms => terms.some(({ type }) => isInverse(type)))) {
       const { docs, docCount } = extended;
       for (let i = 0; i < docCount; i++) {
         const d = docs ? docs[i] : i;
@@ -339,39 +341,169 @@ export function createSearcher(index, scanner, { threshold: defaultThreshold, ig
     return record;
   }
 
-  // With a sortFn, the hits are sorted as Fuse's result records (the order of ties is by document), then cut to the limit.
-  function sortCustom(m, scores, cap, plans, matching) {
-    const ids = Array.from(hitIds.subarray(0, m)), found = matcher?.(ids, plans, matching);
-    const results = ids.map((d, i) => {
-      const slots = slotsOf(d);
-      const matches = slots.filter(slot => scores[slot.s] >= 0).map(({ s, keyDef, value, refIndex }) => {
-        const match = { score: scores[s] };
+  // With a sortFn, the hits ({ idx, score }) are sorted as Fuse's result records (the order of ties is by document), then cut to the limit.
+  // `matchesOf(hit, slots)` lists the strings that matched as { s, score, inverse, indices }; `formatted` maps a document to the `matches` of its result (null: none).
+  function sortCustom(hits, cap, matchesOf, formatted) {
+    const results = hits.map(hit => {
+      const slots = slotsOf(hit.idx), bySlot = new Map(slots.map(slot => [slot.s, slot]));
+      const matches = matchesOf(hit, slots).map(({ s, score, inverse, indices }) => {
+        const { keyDef, value, refIndex } = bySlot.get(s), match = { score };
         if (keyDef) match.key = keyObjects.get(keyDef).key;
         match.value = value;
         if (refIndex !== undefined) match.idx = refIndex;
-        match.norm = norms[s]; match.indices = found?.[i].find(slot => slot.s === s)?.indices;
-        if (keyDef) match.hasInverse = extended?.dense.inverse[s] ? true : undefined;
+        match.norm = norms[s]; match.indices = indices;
+        if (keyDef) match.hasInverse = inverse;
         return match;
       });
-      return { idx: d, item: indexRecord(d, slots), matches, score: docScore[d] };
+      return { idx: hit.idx, item: indexRecord(hit.idx, slots), matches, score: hit.score };
     });
-    const matchesOf = found && new Map(ids.map((d, i) => [d, found[i].map(fuseMatch)]));
     results.sort((a, b) => sortFn(a, b) || a.idx - b.idx);
     return (cap > 0 ? results.slice(0, cap) : results).map(({ idx, score }) => {
       const out = result(idx, score);
-      if (matchesOf) out.matches = matchesOf.get(idx);
+      if (formatted) out.matches = formatted.get(idx);
       return out;
     });
   }
 
+  // The cap on the results for a limit: -1 for none. Fuse takes the best `limit` of a plain query in a heap (so a fraction rounds up), the rest of a sorted list by slice.
+  const capOf = (limit, plain) => typeof limit === "number" && limit > -1 ? (plain && shouldSort ? Math.ceil : Math.trunc)(limit) : -1;
+
+  // Fuse's logical query ({ $and }, { $or }, { key: pattern }, { $path, $val }). Every leaf is scored like a query of its own in every string; a leaf matches in the
+  // strings of its key (all keys for a string) that score, and a document matches when the tree is satisfied. Its score multiplies the matches of all leaves that
+  // were part of the match, so a string matched by two leaves counts twice.
+  function searchLogical(query, { limit, threshold }) {
+    const tree = parseLogical(query);
+    return keyless ? [] : searchTree(tree, capOf(limit, false), threshold, false);
+  }
+
+  function searchTree(tree, cap, threshold, plain) {
+    if (cap === 0) return [];
+    const leaves = leavesOf(tree), t0 = performance.now();
+    for (const leaf of leaves) scoreLeaf(leaf, threshold, plain);
+    const t1 = performance.now(), hits = [];
+    for (let d = 0; d < nDocs; d++) {
+      const entries = evaluateLogical(tree, leaf => leafMatches(leaf, d));
+      if (!entries.length) continue;
+      let total = 1;
+      for (const { s, score } of entries) total *= Math.pow(score === 0 ? exactScore : score, weights[s - d * K] * (ignoreFieldNorm ? 1 : norms[s]));
+      hits.push({ idx: d, entries, score: total });
+    }
+    timings.scan = t1 - t0; timings.combine = performance.now() - t1; timings.format = 0;
+    const matchesOfHit = hit => hit.entries.filter(entry => entry.slot?.indices?.length).map(entry => fuseMatch(entry.slot));
+    if (sortFn) {
+      if (matcher) rangesOfLeaves(leaves, hits);
+      const formatted = matcher && new Map(hits.map(hit => [hit.idx, matchesOfHit(hit)]));
+      return sortCustom(hits, cap, hit => hit.entries.map(({ s, score, leaf, slot }) => ({ s, score, inverse: leaf.found ? slot.hasInverse : leaf.inverse?.[s] ? true : undefined, indices: slot?.indices })), formatted);
+    }
+    if (shouldSort) hits.sort(defaultSortFn);
+    const kept = cap > -1 ? hits.slice(0, cap) : hits, res = kept.map(hit => result(hit.idx, hit.score));
+    if (matcher) {
+      rangesOfLeaves(leaves, kept);
+      kept.forEach((hit, i) => { res[i].matches = matchesOfHit(hit); });
+    }
+    return res;
+  }
+
+  // Scores the strings for the pattern of a leaf, keeping what is needed later: the scores, the strings of its key ([first, end) slot of a document) and
+  // `ranges()` for the highlighting, which makes the scan of an extended search current again (its state is shared by the leaves).
+  function scoreLeaf(leaf, threshold, plain) {
+    const def = leaf.keyId === null ? null : keys.find(({ id }) => id === leaf.keyId);
+    leaf.first = def ? def.base : 0; leaf.end = leaf.keyId === null ? K : def ? def.base + def.width : 0;
+    const searcher = leaf.searcher ?? pluginSearcher(leaf.pattern, threshold);
+    if (searcher) scanPlugin(leaf, searcher, plain);
+    else if (useExtendedSearch) {
+      const groups = extendedGroups(leaf.pattern, threshold), scan = () => extendedScores(groups, false);
+      leaf.plans = groups.flat().flatMap(term => term.plan ?? []);
+      if (groups.some(terms => terms.length)) {
+        leaf.scores = scan().slice();
+        if (sortFn) leaf.inverse = extended.dense.inverse.slice();
+      }
+      leaf.refresh = () => { scan(); return extendedMatching(groups); };
+    } else {
+      leaf.plans = useTokenSearch ? tokenPlans(leaf.pattern, threshold) : [planFor(normalize(leaf.pattern), threshold)];
+      if (leaf.plans.some(plan => plan.q.length)) leaf.scores = (useTokenSearch ? tokenScores(leaf.plans, false) : patternScores(leaf.plans[0])).slice();
+    }
+  }
+
+  // An instance of the first registered plugin (Fuse.use) whose condition holds for the pattern; null for none, and always with extended or token search.
+  function pluginSearcher(pattern, threshold) {
+    const given = threshold === defaultThreshold ? options : { ...options, threshold }, Plugin = pluginFor(pattern, given);
+    return Plugin ? new Plugin(pattern, given) : null;
+  }
+
+  // Fuse's way with a plugin: its searchIn gets the text of every string of the leaf's key, and what it returns is kept as it is, `indices` of the match included.
+  // With `dropInverse` (a plain query), a document is dropped when an inverse match was reported for one of its keys and another key has no match, like Fuse does.
+  function scanPlugin(leaf, searcher, dropInverse) {
+    const { first, end } = leaf, scores = new Float64Array(nStr).fill(-1), found = new Map();
+    for (let d = 0; d < nDocs; d++) {
+      for (const slot of slotsOf(d)) {
+        if (slot.s - d * K < first || slot.s - d * K >= end) continue;
+        const { isMatch, score, indices, hasInverse } = searcher.searchIn(slot.value);
+        if (!isMatch) continue;
+        scores[slot.s] = score; found.set(slot.s, { ...slot, indices, hasInverse });
+      }
+      if (dropInverse && !keyless && droppedByInverse(d, scores, found)) scores.fill(-1, d * K, d * K + K);
+    }
+    leaf.scores = scores; leaf.found = found; leaf.plans = [];
+  }
+
+  function droppedByInverse(d, scores, found) {
+    let hasInverse = false, keyFailed = false;
+    for (const { base, width } of keys) {
+      let first = base;
+      while (first < base + width && scores[d * K + first] < 0) first++;
+      if (first === base + width) keyFailed = true; else if (found.get(d * K + first).hasInverse) hasInverse = true;
+    }
+    return hasInverse && keyFailed;
+  }
+
+  function leafMatches(leaf, d) {
+    const { scores, first, end, found: slots } = leaf, found = [];
+    if (!scores) return found;
+    for (let s = d * K + first; s < d * K + end; s++) if (present[s] && scores[s] >= 0) found.push({ s, score: scores[s], leaf, slot: slots?.get(s) });
+    return found;
+  }
+
+  // Sets `slot` (the string with its `indices`) on the entries of the hits that have highlighted ranges, leaf by leaf.
+  function rangesOfLeaves(leaves, hits) {
+    for (const leaf of leaves) {
+      if (leaf.found) continue;
+      const mine = hits.filter(hit => hit.entries.some(entry => entry.leaf === leaf));
+      if (!mine.length) continue;
+      const found = matcher(mine.map(hit => hit.idx), leaf.plans, leaf.refresh?.());
+      mine.forEach((hit, i) => {
+        for (const slot of found[i]) {
+          const entry = hit.entries.find(e => e.leaf === leaf && e.s === slot.s);
+          if (entry) entry.slot = slot;
+        }
+      });
+    }
+  }
+
+  // sortCustom for the hits of a plain, token or extended search, where one pattern scored every string.
+  function sortHits(m, scores, cap, plans, matching) {
+    const ids = Array.from(hitIds.subarray(0, m)), found = matcher?.(ids, plans, matching), foundOf = found && new Map(ids.map((d, i) => [d, found[i]]));
+    const hits = ids.map(idx => ({ idx, score: docScore[idx] }));
+    const matchesOf = ({ idx }, slots) => slots.filter(slot => scores[slot.s] >= 0).map(({ s }) => (
+      { s, score: scores[s], inverse: extended?.dense.inverse[s] ? true : undefined, indices: foundOf?.get(idx).find(slot => slot.s === s)?.indices }));
+    return sortCustom(hits, cap, matchesOf, foundOf && new Map(ids.map((d, i) => [d, found[i].map(fuseMatch)])));
+  }
+
   function search(query, { limit, threshold = defaultThreshold } = {}) {
-    if (typeof query !== "string") throw new TypeError("fuseter: the query must be a string");
+    if (typeof query !== "string") return searchLogical(query, { limit, threshold });
     if (!query.trim()) {
       const all = docs.map((item, refIndex) => ({ item, refIndex }));
       return typeof limit === "number" && limit > -1 ? all.slice(0, limit) : all;
     }
+    return searchPattern(query, { limit, threshold });
+  }
+
+  // Searches for a string query, without the shortcut for a blank one (Fuseter.match searches for any pattern); `builtin` skips the plugins.
+  function searchPattern(query, { limit, threshold = defaultThreshold, builtin = false } = {}) {
     const cap = typeof limit === "number" && limit > 0 ? Math.ceil(limit) : limit === 0 ? 0 : -1;
     if (cap === 0) return [];
+    const searcher = builtin ? null : pluginSearcher(query, threshold);
+    if (searcher) return searchTree({ keyId: null, pattern: query, searcher }, capOf(limit, true), threshold, true);
     const groups = useExtendedSearch ? extendedGroups(query, threshold) : null;
     const plans = groups ? groups.flat().flatMap(term => term.plan ?? []) : useTokenSearch ? tokenPlans(query, threshold) : [planFor(normalize(query), threshold)];
     if (groups ? !groups.some(terms => terms.length) : useTokenSearch ? !plans.length : !plans[0].q.length) return [];
@@ -393,7 +525,7 @@ export function createSearcher(index, scanner, { threshold: defaultThreshold, ig
       matching = groups && extendedMatching(groups);
       t1 = performance.now();
       const m = groups ? combine(scores, extended.docs, extended.docCount) : combine(scores);
-      if (sortFn) { custom = true; res = sortCustom(m, scores, cap, plans, matching); t2 = t1; }
+      if (sortFn) { custom = true; res = sortHits(m, scores, cap, plans, matching); t2 = t1; }
       else if (ranked) {
         const { ids, scores: keys } = scanner.sortHits(m, cap > 0 && cap < nDocs ? cap : 0);
         const count = cap > 0 && m > cap ? cap : m;
@@ -414,5 +546,5 @@ export function createSearcher(index, scanner, { threshold: defaultThreshold, ig
     timings.scan = t1 - t0; timings.combine = t2 - t1; timings.format = performance.now() - t2;
     return res;
   }
-  return { search, timings };
+  return { search, searchPattern, timings };
 }

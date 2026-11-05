@@ -48,10 +48,9 @@ To see what you end up with, check `ff.backend` and `ff.fallbackReason`.
 ## Differences from Fuse
 
 **Will be fixed in later versions:**
-- Not supported, rejected with a `TypeError`: unknown options, non-string queries.
-- Not provided: `Fuse.match`, `Fuse.parseQuery`, `Fuse.use`.
+- Not supported, rejected with a `TypeError`: unknown options.
 
-**Supported:** `useExtendedSearch` (see [Extended search](#extended-search)), `ignoreLocation`, `location`, `distance` and `findAllMatches` (see [Location scoring](#location-scoring)), string collections, `keys` (names, dotted paths, path arrays, weights), array values (each element is a separate string like in Fuse, at most 64 strings per document), numbers and booleans as text, `threshold` (also per search), `limit`, `shouldSort`, `sortFn`, `getFn` (also per key), `minMatchCharLength`, `includeScore`, `includeMatches` (see below), `isCaseSensitive`, `ignoreDiacritics`, `useTokenSearch` with `tokenize` and `tokenMatch` (see below), `ignoreFieldNorm`, `fieldNormWeight`, blank queries (return every document, like Fuse), patterns longer than 32 characters (chunked like Fuse, slower: no in-wasm combine). `sortFn`, `shouldSort: false` and `minMatchCharLength > 1` also skip the in-wasm combine; `minMatchCharLength` additionally locates the matched fragments of every candidate string in js.
+**Supported:** `useExtendedSearch` (see [Extended search](#extended-search)), `ignoreLocation`, `location`, `distance` and `findAllMatches` (see [Location scoring](#location-scoring)), string collections, `keys` (names, dotted paths, path arrays, weights), array values (each element is a separate string like in Fuse, at most 64 strings per document), numbers and booleans as text, `threshold` (also per search), `limit`, `shouldSort`, `sortFn`, `getFn` (also per key), `minMatchCharLength`, `includeScore`, `includeMatches` (see below), `isCaseSensitive`, `ignoreDiacritics`, logical queries (see [Logical queries](#logical-queries)), `Fuseter.match`, `Fuseter.parseQuery` and `Fuseter.use` (see [Statics](#statics-match-parsequery-use)), `useTokenSearch` with `tokenize` and `tokenMatch` (see below), `ignoreFieldNorm`, `fieldNormWeight`, blank queries (return every document, like Fuse), patterns longer than 32 characters (chunked like Fuse, slower: no in-wasm combine). `sortFn`, `shouldSort: false` and `minMatchCharLength > 1` also skip the in-wasm combine; `minMatchCharLength` additionally locates the matched fragments of every candidate string in js.
 
 **Deliberate differences:**
 - `ignoreLocation` defaults to `true` (Fuse: `false`), because location scoring is slower. Pass `ignoreLocation: false` for Fuse's default behaviour.
@@ -73,6 +72,37 @@ The plain scan first finds the strings that match anywhere within the threshold,
 `add(doc)`, `remove(predicate)`, `removeAt(index)`, `setCollection(docs, index?)` and `getIndex()` work like Fuse's, including which arrays are modified: `add` pushes onto the array you passed in, `removeAt` splices it, `remove` keeps a filtered copy. The index (Fuse's format, see below) is updated at once, and the next search flattens it again, which costs about as much as creating the instance. That is fine for a batch of changes, not for adding one document between every two searches.
 
 `Fuseter.createIndex(keys, docs)` and `Fuseter.parseIndex(json)` use Fuse's index format in both directions: an index made by `Fuse.createIndex` (as the object or its parsed JSON) can be loaded here and the other way round. Pass it as `Fuseter.create(docs, options, { index })`. It saves extracting the strings from the documents; the field norms and strings of the index are used as they are (also by `includeMatches` and `sortFn`, so a `getFn` runs once per document and key). The documents must be the ones the index was made from, and, as in Fuse, `add` and `remove` update the index object you passed in. `getIndex()` returns it, or makes one on first use. `Fuseter.config` holds the defaults of new instances (`Fuseter.config.getFn` is Fuse's default getFn, which a custom `getFn` can wrap) and `Fuseter.version` the package version.
+
+## Logical queries
+
+`search` also takes Fuse's logical query objects: `$and` and `$or` of leaves, which are strings (searched in every key), `{ key: "pattern" }` or `{ $path: "key", $val: "pattern" }` (`$path` may be an array). An object with several keys is the AND of its entries. As in Fuse, `{ $path, $val }` must be inside `$and` or `$or`, not the whole query.
+
+```js
+ff.search({ $and: [{ author: "tolkein" }, { $or: [{ title: "lord" }, "hobit"] }] });
+```
+
+Results, scores and `includeMatches` are identical to Fuse's, with all options (extended search, `sortFn`, location scoring and so on). As in Fuse, the score multiplies the matches of every leaf that took part, so a string matched by two leaves counts twice, and collections of strings never match. Each leaf scans every string like a query of its own, so a logical query costs about as much as its leaves together, and the in-wasm combine is not used. Fuse 7.5 throws on logical queries with `useTokenSearch`; here each leaf is a token search, and `tokenMatch: "all"` has no effect.
+
+## Statics: match, parseQuery, use
+
+`Fuseter.match(pattern, text, options)` compares one pattern with one text and returns Fuse's `{ isMatch, score, indices? }` (`indices` with `includeMatches`). The options are those of a Fuseter on top of `Fuseter.config`, so `ignoreLocation` is on unless you pass `false`. Extended search works, but its result has no `hasInverse`; `useTokenSearch` throws, as in Fuse. Each call builds a one-text instance, which is fine for a few comparisons and not for a loop over a collection (use `search` for that). A blank text never matches, because blank strings are not indexed (Fuse matches them in `match`).
+
+`Fuseter.parseQuery(query, options, { auto })` returns the tree of a logical query as Fuse does: `{ operator, children }` nodes and `{ keyId, pattern, searcher }` leaves (no `searcher` with `auto: false`). A leaf's `searcher.searchIn(text)` is `Fuseter.match` for its pattern, or the plugin that accepts it.
+
+`Fuseter.use(...plugins)` registers search plugins, for all instances. A plugin is a class with `static condition(pattern, options)` and instances with `searchIn(text)`, which returns `{ isMatch, score, indices?, hasInverse? }`. The first plugin whose condition accepts a pattern replaces the built-in search for it, in plain and logical queries, `match` and `parseQuery`, unless `useExtendedSearch` or `useTokenSearch` is on (they come first, as in Fuse). Scores, ordering, `limit`, `sortFn`, `includeMatches` and the rule that drops documents with an inverse match in one key and none in another follow Fuse. A plugin is called for every string with its original text, in js, so it costs a call per string; the kernels are not used. In a logical query every leaf is evaluated on all strings of its key before the tree is, so a plugin may be called on strings Fuse would skip when an `$and` fails early.
+
+```js
+class Prefix {
+  static condition(pattern) { return pattern.startsWith("^^"); }
+  constructor(pattern) { this.prefix = pattern.slice(2).toLowerCase(); }
+  searchIn(text) {
+    const isMatch = text.toLowerCase().startsWith(this.prefix);
+    return { isMatch, score: isMatch ? 0.01 : 1, indices: [[0, this.prefix.length - 1]] };
+  }
+}
+Fuseter.use(Prefix);
+ff.search("^^the");
+```
 
 ## Extended search
 
