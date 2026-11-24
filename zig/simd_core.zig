@@ -6,158 +6,41 @@ pub fn Scan(comptime T: type, comptime L: usize, comptime D: bool, comptime MS: 
         const B = @Vector(L, bool);
         fn splat(x: T) V { return @splat(x); }
 
-        // older_l: the previous level two text positions back, swap: pattern positions whose two characters are the last two text characters, swapped.
-        inline fn levelFast(oi: V, old_l: V, new_l: V, older_l: V, swap: V, cm: V, comptime first: bool) V {
+        // Myers' bit-vector algorithm (see scan and scanTransposed in kernel-js.mjs): best error level per lane, ~0 when it exceeds kmax. The state of a lane that has
+        // run out of text is not frozen, only its minimum is.
+        fn groupMyers(kmax: u32, pat_len: u32, row_base: [*]const u16, table: [*]const T, len_v: V, min_len: u32, max_len: u32) V {
+            const Shift = if (@bitSizeOf(T) == 16) u4 else u5;
             const one = splat(1);
-            var nv = ((oi +% oi) | one) & cm;
-            if (!first) {
-                const m = old_l | new_l;
-                nv |= (m +% m) | one | old_l;
+            const last = splat(@as(T, 1) << @as(Shift, @intCast(pat_len - 1)));
+            const zero = splat(0);
+            const up: @Vector(L, Shift) = @splat(1);
+            var pv = splat(~@as(T, 0));
+            var mv = splat(0);
+            var d0 = splat(0);
+            var previous = splat(0);
+            var errors = splat(@intCast(pat_len));
+            var best = splat(@intCast(kmax + 1));
+            var r: u32 = 0;
+            while (r < max_len) : (r += 1) {
+                const row = row_base + r * L;
+                var eq_arr: [L]T = undefined;
+                inline for (0..L) |l| eq_arr[l] = table[row[l]];
+                const eq: V = eq_arr;
+                var zero_diag = (((eq & pv) +% pv) ^ pv) | eq | mv;
                 if (D) {
-                    const d = older_l +% older_l;
-                    nv |= ((d +% d) | splat(2)) & swap;
+                    zero_diag |= ((~d0 & eq) << up) & previous;
+                    previous = eq;
                 }
+                d0 = zero_diag;
+                var ph = mv | ~(d0 | pv);
+                const mh = pv & d0;
+                errors = errors +% @select(T, (ph & last) != zero, one, zero) -% @select(T, (mh & last) != zero, one, zero);
+                ph <<= up;
+                pv = (mh << up) | ~(d0 | ph);
+                mv = ph & d0;
+                best = if (r < min_len) @min(best, errors) else @select(T, splat(@intCast(r)) < len_v, @min(best, errors), best);
             }
-            return nv;
-        }
-
-        inline fn level(oi: V, old_l: V, new_l: V, older_l: V, swap: V, cm: V, active: B, comptime first: bool) V {
-            return @select(T, active, levelFast(oi, old_l, new_l, older_l, swap, cm, first), oi);
-        }
-
-        // best level per lane, fully unrolled over levels 0..KM
-        fn groupFixed(comptime KM: u32, row_base: [*]const u16, table: [*]const T, len_v: V, min_len: u32, max_len: u32, mask: V) V {
-            const zero = splat(0);
-            var st: [KM + 1]V = undefined;
-            var st2: [KM + 1]V = undefined;
-            var hit_st: [KM + 1]V = undefined;
-            inline for (0..KM + 1) |q| {
-                st[q] = splat((@as(T, 1) << @intCast(q)) -% 1);
-                st2[q] = st[q];
-                hit_st[q] = zero;
-            }
-            var prev_cm = zero;
-            var r: u32 = 0;
-            while (r < min_len) : (r += 1) {
-                const row = row_base + r * L;
-                var cm_arr: [L]T = undefined;
-                inline for (0..L) |l| cm_arr[l] = table[row[l]];
-                const cm: V = cm_arr;
-                const swap = if (D) prev_cm & (cm +% cm) else zero;
-                prev_cm = cm;
-                var old_l = zero;
-                var new_l = zero;
-                var older_l = zero;
-                inline for (0..KM + 1) |i| {
-                    const oi = st[i];
-                    const o2 = st2[i];
-                    const nv = levelFast(oi, old_l, new_l, older_l, swap, cm, i == 0);
-                    st[i] = nv;
-                    st2[i] = oi;
-                    hit_st[i] |= nv;
-                    older_l = o2;
-                    old_l = oi;
-                    new_l = nv;
-                }
-            }
-            while (r < max_len) : (r += 1) {
-                const active: B = splat(@intCast(r)) < len_v;
-                const row = row_base + r * L;
-                var cm_arr: [L]T = undefined;
-                inline for (0..L) |l| cm_arr[l] = table[row[l]];
-                const cm: V = cm_arr;
-                const swap = if (D) prev_cm & (cm +% cm) else zero;
-                prev_cm = cm;
-                var old_l = zero;
-                var new_l = zero;
-                var older_l = zero;
-                inline for (0..KM + 1) |i| {
-                    const oi = st[i];
-                    const o2 = st2[i];
-                    const nv = level(oi, old_l, new_l, older_l, swap, cm, active, i == 0);
-                    st[i] = nv;
-                    st2[i] = oi;
-                    hit_st[i] |= nv;
-                    older_l = o2;
-                    old_l = oi;
-                    new_l = nv;
-                }
-            }
-            var best = splat(~@as(T, 0));
-            inline for (0..KM + 1) |idx| {
-                const i = KM - idx;
-                best = @select(T, (hit_st[i] & mask) != zero, splat(@intCast(i)), best);
-            }
-            return best;
-        }
-
-        fn groupDyn(kmax: u32, row_base: [*]const u16, table: [*]const T, len_v: V, min_len: u32, max_len: u32, mask: V) V {
-            const zero = splat(0);
-            var st: [32]V = undefined;
-            var st2: [32]V = undefined;
-            var hit_st: [32]V = undefined;
-            var q: u32 = 0;
-            while (q <= kmax) : (q += 1) {
-                st[q] = splat((@as(T, 1) << @intCast(q)) -% 1);
-                st2[q] = st[q];
-                hit_st[q] = zero;
-            }
-            var prev_cm = zero;
-            var r: u32 = 0;
-            while (r < min_len) : (r += 1) {
-                const row = row_base + r * L;
-                var cm_arr: [L]T = undefined;
-                inline for (0..L) |l| cm_arr[l] = table[row[l]];
-                const cm: V = cm_arr;
-                const swap = if (D) prev_cm & (cm +% cm) else zero;
-                prev_cm = cm;
-                var old_l = zero;
-                var new_l = zero;
-                var older_l = zero;
-                var i: u32 = 0;
-                while (i <= kmax) : (i += 1) {
-                    const oi = st[i];
-                    const o2 = st2[i];
-                    const nv = if (i == 0) levelFast(oi, old_l, new_l, older_l, swap, cm, true) else levelFast(oi, old_l, new_l, older_l, swap, cm, false);
-                    st[i] = nv;
-                    st2[i] = oi;
-                    hit_st[i] |= nv;
-                    older_l = o2;
-                    old_l = oi;
-                    new_l = nv;
-                }
-            }
-            while (r < max_len) : (r += 1) {
-                const active: B = splat(@intCast(r)) < len_v;
-                const row = row_base + r * L;
-                var cm_arr: [L]T = undefined;
-                inline for (0..L) |l| cm_arr[l] = table[row[l]];
-                const cm: V = cm_arr;
-                const swap = if (D) prev_cm & (cm +% cm) else zero;
-                prev_cm = cm;
-                var old_l = zero;
-                var new_l = zero;
-                var older_l = zero;
-                var i: u32 = 0;
-                while (i <= kmax) : (i += 1) {
-                    const oi = st[i];
-                    const o2 = st2[i];
-                    const nv = if (i == 0) level(oi, old_l, new_l, older_l, swap, cm, active, true) else level(oi, old_l, new_l, older_l, swap, cm, active, false);
-                    st[i] = nv;
-                    st2[i] = oi;
-                    hit_st[i] |= nv;
-                    older_l = o2;
-                    old_l = oi;
-                    new_l = nv;
-                }
-            }
-            var best = splat(~@as(T, 0));
-            var i: u32 = kmax + 1;
-            while (i > 0) {
-                i -= 1;
-                best = @select(T, (hit_st[i] & mask) != zero, splat(@intCast(i)), best);
-            }
-            return best;
+            return @select(T, best <= splat(@intCast(kmax)), best, splat(~@as(T, 0)));
         }
 
         const Prep = struct { len_v: V, min_len: u32, max_len: u32 };
@@ -177,16 +60,6 @@ pub fn Scan(comptime T: type, comptime L: usize, comptime D: bool, comptime MS: 
                 max_len = @max(max_len, len);
             }
             return .{ .len_v = len_arr, .min_len = min_len, .max_len = max_len };
-        }
-
-        fn bestOf(kmax: u32, row_base: [*]const u16, table: [*]const T, p: Prep, mask: V) V {
-            if (kmax <= MS) {
-                return switch (kmax) {
-                    inline 0...MS => |k| groupFixed(k, row_base, table, p.len_v, p.min_len, p.max_len, mask),
-                    else => unreachable,
-                };
-            }
-            return groupDyn(kmax, row_base, table, p.len_v, p.min_len, p.max_len, mask);
         }
 
         // first group index whose strings may match: a match needs at least pat_len - kmax text characters
@@ -352,7 +225,10 @@ pub fn Scan(comptime T: type, comptime L: usize, comptime D: bool, comptime MS: 
             var g: usize = first;
             while (g < n) : (g += L) {
                 const p = prep(g, offs, order, n);
-                const bv = bestOfW(kmax, data + goff[g / L], flags + goff[g / L], table, p, mask, wt, &ini);
+                // No operation costs less than in the unweighted scan, so a group where it finds no match in any lane has none either.
+                const lower = groupMyers(kmax, pat_len, data + goff[g / L], table, p.len_v, p.min_len, p.max_len);
+                const none = splat(~@as(T, 0));
+                const bv = if (@reduce(.And, lower == none)) none else bestOfW(kmax, data + goff[g / L], flags + goff[g / L], table, p, mask, wt, &ini);
                 inline for (0..L) |l| {
                     if (g + l < n) {
                         const v = bv[l];
@@ -479,13 +355,12 @@ pub fn Scan(comptime T: type, comptime L: usize, comptime D: bool, comptime MS: 
             pat_len: u32, kmax: u32, out: [*]f64,
         ) void {
             const plf: f64 = @floatFromInt(pat_len);
-            const mask = splat(@as(T, 1) << @intCast(pat_len - 1));
             const first = firstGroup(offs, order, n, pat_len - kmax);
             for (order[0..first]) |s| out[s] = -1.0;
             var g: usize = first;
             while (g < n) : (g += L) {
                 const p = prep(g, offs, order, n);
-                const b = bestOf(kmax, data + goff[g / L], table, p, mask);
+                const b = groupMyers(kmax, pat_len, data + goff[g / L], table, p.len_v, p.min_len, p.max_len);
                 inline for (0..L) |l| {
                     if (g + l < n) {
                         const v = b[l];

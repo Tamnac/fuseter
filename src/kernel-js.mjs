@@ -17,58 +17,99 @@ export function fillCharTable(table, pattern, previous) {
   }
 }
 
-// One-pass multi-level Bitap over every string: out[s] = best error level / patLen (clamped to >= 0.001), or -1 without a match.
-function scan(corpus, patLen, T, kmax, out, S, ids, count) {
-  const { data, offs } = corpus;
-  const mask = 1 << (patLen - 1), need = patLen - kmax;
-  for (let r = 0; r < count; r++) {
-    const s = ids ? ids[r] : r;
-    const ts = offs[s], textLen = offs[s + 1] - ts;
-    if (textLen < need) { out[s] = -1; continue; }
-    let K = kmax, best = -1;
-    for (let i = 0; i <= K; i++) S[i] = (1 << i) - 1;
-    outer: for (let j = textLen; j >= 1; j--) {
-      const cm = T[data[ts + j - 1]];
-      let oldL = 0, newL = 0;
-      for (let i = 0; i <= K; i++) {
-        const oi = S[i];
-        let nv = ((oi << 1) | 1) & cm;
-        if (i !== 0) nv |= ((oldL | newL) << 1) | 1 | oldL;
-        S[i] = nv;
-        if (nv & mask) { best = i; K = i - 1; if (K < 0) break outer; break; }
-        oldL = oi; newL = nv;
-      }
+// Per string, which of 32 character buckets (char code & 31) occur at least once, twice and three times. A match with k errors leaves at most k pattern
+// characters unmatched, so a string that lacks more characters than that (counted per bucket up to three, see `missing`) cannot match.
+export function bucketMasks(corpus) {
+  if (corpus.buckets) return corpus.buckets;
+  const { data, offs, n } = corpus;
+  const once = new Int32Array(n), twice = new Int32Array(n), thrice = new Int32Array(n);
+  for (let s = 0; s < n; s++) {
+    let a = 0, b = 0, c = 0;
+    for (let p = offs[s], end = offs[s + 1]; p < end; p++) {
+      const bit = 1 << (data[p] & 31);
+      c |= b & bit; b |= a & bit; a |= bit;
     }
-    out[s] = best >= 0 ? Math.max(best / patLen, 0.001) : -1;
+    once[s] = a; twice[s] = b; thrice[s] = c;
   }
+  return corpus.buckets = { once, twice, thrice };
 }
 
-// Same scan with adjacent transpositions as one error (optimal string alignment distance, Hyyro's bit-parallel extension).
-// Pattern bit p is set in `swap` when the pattern characters at p-1 and p are the last two text characters read, in swapped order;
-// level i then also takes level i-1 from two steps back, shifted by two (bit 1 is the empty prefix, which always matches).
-function scanTransposed(corpus, patLen, T, kmax, out, S, S2, ids, count) {
+export function patternBuckets(pattern) {
+  let once = 0, twice = 0, thrice = 0;
+  for (let i = 0; i < pattern.length; i++) {
+    const bit = 1 << (pattern.charCodeAt(i) & 31);
+    thrice |= twice & bit; twice |= once & bit; once |= bit;
+  }
+  return { once, twice, thrice };
+}
+
+// popcount(a) + popcount(b) + popcount(c) with one multiplication (a byte of the sum is at most 24).
+function missing(a, b, c) {
+  a -= (a >>> 1) & 0x55555555; b -= (b >>> 1) & 0x55555555; c -= (c >>> 1) & 0x55555555;
+  a = (a & 0x33333333) + ((a >>> 2) & 0x33333333) + (b & 0x33333333) + ((b >>> 2) & 0x33333333);
+  c = (c & 0x33333333) + ((c >>> 2) & 0x33333333);
+  a = (a & 0x0f0f0f0f) + ((a >>> 4) & 0x0f0f0f0f) + (c & 0x0f0f0f0f) + ((c >>> 4) & 0x0f0f0f0f);
+  return Math.imul(a, 0x01010101) >>> 24;
+}
+
+// Myers' bit-vector algorithm: the lowest edit distance of the pattern to any substring of the text data[ts, end), or kmax + 1 when it exceeds kmax.
+// pv and mv hold the +1 and -1 vertical differences of the pattern column; `errors` follows the last row.
+// The distance drops by at most 1 per text character, so the scan stops once the remaining text cannot get below the best found.
+function distance(data, ts, end, T, patLen, kmax) {
+  const top = patLen - 1;
+  let pv = -1, mv = 0, errors = patLen, best = kmax + 1, stop = ts - best;
+  for (let p = end - 1; p >= stop + errors; p--) {
+    const eq = T[data[p]];
+    const xv = eq | mv, xh = (((eq & pv) + pv) ^ pv) | eq;
+    let ph = mv | ~(xh | pv);
+    const mh = pv & xh;
+    errors += ((ph >>> top) & 1) - ((mh >>> top) & 1);
+    ph <<= 1;
+    pv = (mh << 1) | ~(xv | ph);
+    mv = ph & xv;
+    if (errors < best) {
+      if ((best = errors) === 0) break;
+      stop = ts - best;
+    }
+  }
+  return best;
+}
+
+// Same with adjacent transpositions as one error (optimal string alignment distance, Hyyro's bit-parallel extension of Myers' algorithm).
+// d0 marks the pattern positions where the last text character continues a match along the diagonal; `previous` is the table entry of the text character before it.
+// A transposition at position i needs the characters at i-1 and i to match the last two text characters in swapped order, and no diagonal match at i-1 one step earlier.
+function distanceTransposed(data, ts, end, T, patLen, kmax) {
+  const top = patLen - 1;
+  let pv = -1, mv = 0, d0 = 0, previous = 0, errors = patLen, best = kmax + 1, stop = ts - best;
+  for (let p = end - 1; p >= stop + errors; p--) {
+    const eq = T[data[p]];
+    d0 = (((~d0 & eq) << 1) & previous) | (((eq & pv) + pv) ^ pv) | eq | mv;
+    previous = eq;
+    let ph = mv | ~(d0 | pv);
+    const mh = pv & d0;
+    errors += ((ph >>> top) & 1) - ((mh >>> top) & 1);
+    ph <<= 1;
+    pv = (mh << 1) | ~(d0 | ph);
+    mv = ph & d0;
+    if (errors < best) {
+      if ((best = errors) === 0) break;
+      stop = ts - best;
+    }
+  }
+  return best;
+}
+
+// out[s] = lowest edit distance / patLen (clamped to >= 0.001), or -1 when it exceeds kmax, for the strings ids[0..count) (all of them without ids).
+function scan(corpus, patLen, T, kmax, transposition, out, ids, count, buckets) {
   const { data, offs } = corpus;
-  const mask = 1 << (patLen - 1), need = patLen - kmax;
+  const { once, twice, thrice } = bucketMasks(corpus);
+  const need = patLen - kmax, measure = transposition ? distanceTransposed : distance;
   for (let r = 0; r < count; r++) {
     const s = ids ? ids[r] : r;
-    const ts = offs[s], textLen = offs[s + 1] - ts;
-    if (textLen < need) { out[s] = -1; continue; }
-    let K = kmax, best = -1, previous = 0;
-    for (let i = 0; i <= K; i++) S[i] = S2[i] = (1 << i) - 1;
-    outer: for (let j = textLen; j >= 1; j--) {
-      const cm = T[data[ts + j - 1]], swap = previous & (cm << 1);
-      previous = cm;
-      let oldL = 0, newL = 0, older = 0;
-      for (let i = 0; i <= K; i++) {
-        const oi = S[i], oi2 = S2[i];
-        let nv = ((oi << 1) | 1) & cm;
-        if (i !== 0) nv |= ((oldL | newL) << 1) | 1 | oldL | (((older << 2) | 2) & swap);
-        S2[i] = oi; S[i] = nv;
-        if (nv & mask) { best = i; K = i - 1; if (K < 0) break outer; break; }
-        older = oi2; oldL = oi; newL = nv;
-      }
-    }
-    out[s] = best >= 0 ? Math.max(best / patLen, 0.001) : -1;
+    const ts = offs[s], end = offs[s + 1];
+    if (end - ts < need || missing(~once[s] & buckets.once, ~twice[s] & buckets.twice, ~thrice[s] & buckets.thrice) > kmax) { out[s] = -1; continue; }
+    const best = measure(data, ts, end, T, patLen, kmax);
+    out[s] = best <= kmax ? Math.max(best / patLen, 0.001) : -1;
   }
 }
 
@@ -78,15 +119,17 @@ function scanTransposed(corpus, patLen, T, kmax, out, S, S2, ids, count) {
 // Weighted positions are reached through level i-2 instead of i-1 when they are not an exact free match, and a deletion run at the
 // start of the match is priced per character (`init`). A transposition keeps its cost of 1, but one whose first character is a weighted
 // position has to start on a word-initial text character.
+// No operation costs less than in the unweighted scan, so a string whose unweighted distance exceeds kmax cannot match and is skipped before the slower scan.
 const init = new Int32Array(64);
-function scanWeighted(corpus, patLen, T, kmax, rule, transposition, out, S, S2) {
+function scanWeighted(corpus, patLen, T, kmax, rule, transposition, out, S, S2, buckets) {
   const { data, offs, n, starts } = corpus;
+  const { once, twice, thrice } = bucketMasks(corpus), measure = transposition ? distanceTransposed : distance;
   const { mask: W, midWord, denom } = rule, notW = ~W, top = 1 << (patLen - 1), need = patLen - kmax;
   init.fill(0, 0, kmax + 1);
   for (let b = 0, cost = 0; b < patLen && (cost += 1 + ((W >>> b) & 1)) <= kmax; b++) for (let i = cost; i <= kmax; i++) init[i] |= 1 << b;
   for (let s = 0; s < n; s++) {
     const ts = offs[s], textLen = offs[s + 1] - ts;
-    if (textLen < need) { out[s] = -1; continue; }
+    if (textLen < need || missing(~once[s] & buckets.once, ~twice[s] & buckets.twice, ~thrice[s] & buckets.thrice) > kmax || measure(data, ts, ts + textLen, T, patLen, kmax) > kmax) { out[s] = -1; continue; }
     let K = kmax, best = -1, previous = 0;
     for (let i = 0; i <= K; i++) S[i] = S2[i] = init[i];
     outer: for (let j = textLen; j >= 1; j--) {
@@ -115,17 +158,18 @@ function scanWeighted(corpus, patLen, T, kmax, rule, transposition, out, S, S2) 
 // `scan(patLen, kmax, rule)`: a rule ({ mask, midWord, denom }, see scanWeighted) switches to word-start scoring, which needs corpus.starts.
 export function jsScanner(corpus, { transposition = false } = {}) {
   const T = new Int32Array(65536), S = new Int32Array(64), S2 = new Int32Array(64), out = new Float64Array(corpus.n), previous = [];
+  let buckets;
   return {
     out,
-    prep(pattern) { fillCharTable(T, pattern, previous); },
+    prep(pattern) { fillCharTable(T, pattern, previous); buckets = patternBuckets(pattern); },
     scan(patLen, kmax, rule = null) {
-      if (rule) scanWeighted(corpus, patLen, T, kmax, rule, transposition, out, S, S2);
-      else if (transposition) scanTransposed(corpus, patLen, T, kmax, out, S, S2, null, corpus.n); else scan(corpus, patLen, T, kmax, out, S, null, corpus.n);
+      if (rule) scanWeighted(corpus, patLen, T, kmax, rule, transposition, out, S, S2, buckets);
+      else scan(corpus, patLen, T, kmax, transposition, out, null, corpus.n, buckets);
       return out;
     },
     // Only the first `count` strings of `ids` are scored (no rule); the other entries of the result are stale.
     scanSubset(patLen, kmax, ids, count) {
-      if (transposition) scanTransposed(corpus, patLen, T, kmax, out, S, S2, ids, count); else scan(corpus, patLen, T, kmax, out, S, ids, count);
+      scan(corpus, patLen, T, kmax, transposition, out, ids, count, buckets);
       return out;
     },
   };

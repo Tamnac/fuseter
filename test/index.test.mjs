@@ -239,3 +239,15 @@ describe("static members", () => {
     try { assert.equal((await Fuseter.create(["abc"])).options.threshold, 0.1); } finally { Fuseter.config.threshold = before; }
   });
 });
+
+describe("pre-filter of the scan", () => {
+  test("counts a pattern with many distinct characters correctly", async () => {
+    const docs = ["123456789az"], query = "ddeeffgghhiijjkk123456789az";
+    const expected = new Fuse(docs, { includeScore: true, ignoreLocation: true, threshold: 0.6 }).search(query);
+    assert.equal(expected.length, 1);
+    for (const backend of ["js", "wasm", "simd"]) {
+      const ff = await Fuseter.create(docs, { includeScore: true, threshold: 0.6 }, { backend, fallback: "throw" });
+      assert.deepEqual(ff.search(query).map(r => r.score), expected.map(r => r.score), backend);
+    }
+  });
+});

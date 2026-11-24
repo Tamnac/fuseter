@@ -7,7 +7,7 @@ const { docs, results } = JSON.parse(readFileSync(input, "utf8"));
 const THRESHOLD = 0.3;
 
 const SERIES = {
-  fuse: ["Fuse", "#8b949e"],
+  fuse: ["Fuse 7.5", "#8b949e"],
   js: ["fuseter/js", "#e8a33d"],
   wasm: ["fuseter/wasm", "#3b8eea"],
   simd: ["fuseter (simd)", "#1f9d55"],
