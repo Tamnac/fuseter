@@ -42,7 +42,8 @@
   },
   "types": "./src/index.d.ts",
   "files": [
-    "src"
+    "src",
+    "docs/*.md"
   ],
   "sideEffects": false,
   "engines": {

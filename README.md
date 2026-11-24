@@ -2,20 +2,24 @@
 
 Fuseter is a replacement for [Fuse.js](https://github.com/krisk/fuse) that is significantly faster and comes with some heuristics for improved scoring. Full parity is a WIP.
 
-Fuse's location scoring (`ignoreLocation: false`, `location`, `distance`, `findAllMatches`) is supported and matches Fuse exactly, see [Location scoring](#location-scoring). It is off by default here because it is slower.
+- 25-200x faster than Fuse 7.5 (plain js tier)
+- 100-500x faster (simd tier)
+- Same results and scores as Fuse, unless you turn on the [typing heuristics](docs/typing.md)
 
-Fuseter is 10-40x faster with the plain js tier and 100-300x faster with the simd tier.
+Fuse has released a 7.6 beta, which is about 10x faster than 7.5. All comparisons with Fuse in this README are against Fuse 7.5 and earlier.
 
 ESM only; `require()` works on Node 20.19+ and 22.12+.
 
-Usage:
+## Usage
 
 ```js
 import { Fuseter } from "fuseter";          // or "fuseter/js", "fuseter/wasm", "fuseter/simd"
 const ff = await Fuseter.create(books, { keys: [{ name: "title", weight: 3 }, "author"], threshold: 0.3, includeScore: true });
 ff.search("hary poter", { limit: 10 });        // [{ item, refIndex, score }]
-ff.backend;                                    // the tier that is really running
+ff.backend;                                    // the tier that is running
 ```
+
+The options, methods and return values follow Fuse's. See [Options and API](docs/options.md).
 
 ## Backends
 
@@ -29,17 +33,18 @@ The same measurements without Fuse, using a linear scale to better see differenc
 
 | tier | needs | download (gzip) | search, 10K docs, threshold 0.3 |
 |---|---|---|---|
-| `simd` | WebAssembly SIMD (all current browsers and Node) | 36.0 KB | 0.4-0.7 ms |
-| `wasm` | WebAssembly | 20.1 KB | 2-3 ms |
-| `js` | nothing | 15.7 KB | 4-5 ms |
-| Fuse 7.5 | nothing | | 40-200 ms |
+| `simd` | WebAssembly SIMD (all current browsers and Node) | 31.4 KB | 0.3-0.4 ms |
+| `wasm` | WebAssembly | 22.1 KB | 0.6-1.2 ms |
+| `js` | nothing | 17.6 KB | 0.7-1.3 ms |
+| Fuse 7.5 | nothing | | 33-134 ms |
+| Fuse 7.6 beta | nothing | | 4-5 ms |
 
-Download sizes are the entry point minified with esbuild and gzipped; the simd entry includes the base64 wasm module (about 4/3 of its raw size).
+Download sizes are the entry point minified with esbuild and gzipped.
 
 What to choose:
 
-- **Default**: `import { Fuseter } from "fuseter"` uses simd and falls back to the js build automatically if needed (no WebAssembly, blocked by a Content-Security-Policy, out of memory).
-- **Smallest bundle**: import from `fuseter/js` or `fuseter/wasm`. `fuseter/js` contains no wasm at all, and `fuseter/wasm` only the small scalar module.
+- **Default**: `import { Fuseter } from "fuseter"` uses simd and falls back to js if needed.
+- **Smallest bundle**: import from `fuseter/js`, no wasm.
 - **A specific tier**: `Fuseter.create(docs, options, { backend: "wasm" })`. `fallback` sets how far it may degrade: `"js"` (default), `"wasm"`, or `"throw"` to fail instead.
 - **Without await**: `Fuseter.createSync(docs, options)` returns a js instance immediately, because wasm compiles asynchronously.
 
@@ -47,162 +52,35 @@ To see what you end up with, check `ff.backend` and `ff.fallbackReason`.
 
 ## Differences from Fuse
 
-**Will be fixed in later versions:**
-- Not supported, rejected with a `TypeError`: unknown options.
-
-**Supported:** `useExtendedSearch` (see [Extended search](#extended-search)), `ignoreLocation`, `location`, `distance` and `findAllMatches` (see [Location scoring](#location-scoring)), string collections, `keys` (names, dotted paths, path arrays, weights), array values (each element is a separate string like in Fuse, at most 64 strings per document), numbers and booleans as text, `threshold` (also per search), `limit`, `shouldSort`, `sortFn`, `getFn` (also per key), `minMatchCharLength`, `includeScore`, `includeMatches` (see below), `isCaseSensitive`, `ignoreDiacritics`, logical queries (see [Logical queries](#logical-queries)), `Fuseter.match`, `Fuseter.parseQuery` and `Fuseter.use` (see [Statics](#statics-match-parsequery-use)), `useTokenSearch` with `tokenize` and `tokenMatch` (see below), `ignoreFieldNorm`, `fieldNormWeight`, blank queries (return every document, like Fuse), patterns longer than 32 characters (chunked like Fuse, slower: no in-wasm combine). `sortFn`, `shouldSort: false` and `minMatchCharLength > 1` also skip the in-wasm combine; `minMatchCharLength` additionally locates the matched fragments of every candidate string in js.
+Everything else in Fuse's API is supported, see [Options and API](docs/options.md).
 
 **Deliberate differences:**
-- `ignoreLocation` defaults to `true` (Fuse: `false`), because location scoring is slower. Pass `ignoreLocation: false` for Fuse's default behaviour.
+- `ignoreLocation` defaults to `true` (Fuse: `false`), because [location scoring](docs/location.md) is slower. Pass `ignoreLocation: false` for Fuse's default behaviour.
 - `ignoreDiacritics` strips `\p{M}`, Fuse uses a fixed list of marks; 73 recently added code points differ.
 - Objects inside array values are ignored (Fuse indexes `"[object Object]"`).
 
-## Location scoring
+**Will be fixed in later versions:**
+- Unknown options are rejected with a `TypeError`.
 
-`ignoreLocation: false` scores like Fuse's default: a match costs its errors / pattern length plus its distance from `location` divided by `distance`, and only the text within that distance is searched. `location` must be an integer, a pattern over 32 characters expects each chunk further along, and `findAllMatches` widens the searched text as in Fuse. Scores, order, `includeMatches` and `minMatchCharLength` are identical to Fuse's on every backend.
+## Documentation
 
-```js
-const ff = await Fuseter.create(books, { keys: ["title"], ignoreLocation: false, location: 0, distance: 100 });
-```
-
-The plain scan first finds the strings that match anywhere within the threshold, and only those are scored the way Fuse does, in js (`src/located.mjs`, on every tier), because the window and the threshold depend on the matches found so far. The cost therefore depends on how many strings pass the threshold: on 10K books a simd search takes 0.05 ms longer at threshold 0.3 (a few hits) and 5-6 ms longer at 0.6 (1.3-1.9K hits), see `scripts/bench-location.mjs`. The js code adds about 1 KB (gzip) to every entry point, the wasm modules do not change. `typing` and `highlighting` are not available with it, token search ignores the location for its terms like Fuse does.
-
-## Changing the collection, indexes
-
-`add(doc)`, `remove(predicate)`, `removeAt(index)`, `setCollection(docs, index?)` and `getIndex()` work like Fuse's, including which arrays are modified: `add` pushes onto the array you passed in, `removeAt` splices it, `remove` keeps a filtered copy. The index (Fuse's format, see below) is updated at once, and the next search flattens it again, which costs about as much as creating the instance. That is fine for a batch of changes, not for adding one document between every two searches.
-
-`Fuseter.createIndex(keys, docs)` and `Fuseter.parseIndex(json)` use Fuse's index format in both directions: an index made by `Fuse.createIndex` (as the object or its parsed JSON) can be loaded here and the other way round. Pass it as `Fuseter.create(docs, options, { index })`. It saves extracting the strings from the documents; the field norms and strings of the index are used as they are (also by `includeMatches` and `sortFn`, so a `getFn` runs once per document and key). The documents must be the ones the index was made from, and, as in Fuse, `add` and `remove` update the index object you passed in. `getIndex()` returns it, or makes one on first use. `Fuseter.config` holds the defaults of new instances (`Fuseter.config.getFn` is Fuse's default getFn, which a custom `getFn` can wrap) and `Fuseter.version` the package version.
-
-## Logical queries
-
-`search` also takes Fuse's logical query objects: `$and` and `$or` of leaves, which are strings (searched in every key), `{ key: "pattern" }` or `{ $path: "key", $val: "pattern" }` (`$path` may be an array). An object with several keys is the AND of its entries. As in Fuse, `{ $path, $val }` must be inside `$and` or `$or`, not the whole query.
-
-```js
-ff.search({ $and: [{ author: "tolkein" }, { $or: [{ title: "lord" }, "hobit"] }] });
-```
-
-Results, scores and `includeMatches` are identical to Fuse's, with all options (extended search, `sortFn`, location scoring and so on). As in Fuse, the score multiplies the matches of every leaf that took part, so a string matched by two leaves counts twice, and collections of strings never match. Each leaf scans every string like a query of its own, so a logical query costs about as much as its leaves together, and the in-wasm combine is not used. Fuse 7.5 throws on logical queries with `useTokenSearch`; here each leaf is a token search, and `tokenMatch: "all"` has no effect.
-
-## Statics: match, parseQuery, use
-
-`Fuseter.match(pattern, text, options)` compares one pattern with one text and returns Fuse's `{ isMatch, score, indices? }` (`indices` with `includeMatches`). The options are those of a Fuseter on top of `Fuseter.config`, so `ignoreLocation` is on unless you pass `false`. Extended search works, but its result has no `hasInverse`; `useTokenSearch` throws, as in Fuse. Each call builds a one-text instance, which is fine for a few comparisons and not for a loop over a collection (use `search` for that). A blank text never matches, because blank strings are not indexed (Fuse matches them in `match`).
-
-`Fuseter.parseQuery(query, options, { auto })` returns the tree of a logical query as Fuse does: `{ operator, children }` nodes and `{ keyId, pattern, searcher }` leaves (no `searcher` with `auto: false`). A leaf's `searcher.searchIn(text)` is `Fuseter.match` for its pattern, or the plugin that accepts it.
-
-`Fuseter.use(...plugins)` registers search plugins, for all instances. A plugin is a class with `static condition(pattern, options)` and instances with `searchIn(text)`, which returns `{ isMatch, score, indices?, hasInverse? }`. The first plugin whose condition accepts a pattern replaces the built-in search for it, in plain and logical queries, `match` and `parseQuery`, unless `useExtendedSearch` or `useTokenSearch` is on (they come first, as in Fuse). Scores, ordering, `limit`, `sortFn`, `includeMatches` and the rule that drops documents with an inverse match in one key and none in another follow Fuse. A plugin is called for every string with its original text, in js, so it costs a call per string; the kernels are not used. In a logical query every leaf is evaluated on all strings of its key before the tree is, so a plugin may be called on strings Fuse would skip when an `$and` fails early.
-
-```js
-class Prefix {
-  static condition(pattern) { return pattern.startsWith("^^"); }
-  constructor(pattern) { this.prefix = pattern.slice(2).toLowerCase(); }
-  searchIn(text) {
-    const isMatch = text.toLowerCase().startsWith(this.prefix);
-    return { isMatch, score: isMatch ? 0.01 : 1, indices: [[0, this.prefix.length - 1]] };
-  }
-}
-Fuseter.use(Prefix);
-ff.search("^^the");
-```
-
-## Extended search
-
-`useExtendedSearch: true` reads the query in Fuse's extended syntax. A query is groups separated by `|`, a group matches a string when all its space-separated terms do, and the first matching group decides the score (the mean of its terms' scores). `\|` is a literal bar.
-
-| term | matches strings that |
-|---|---|
-| `jscript` | fuzzy-match `jscript` |
-| `=scheme` | equal `scheme` |
-| `'python` | include `python` |
-| `^java` | start with `java` |
-| `.js$` | end with `.js` |
-| `!ruby` | do not include `ruby` |
-| `!^java` | do not start with `java` |
-| `!.js$` | do not end with `.js` |
-
-A term with spaces goes in double quotes, also behind an operator: `^"the lord"`.
-
-```js
-const ff = await Fuseter.create(books, { keys: ["title", "author"], useExtendedSearch: true });
-ff.search("^the lord | 'ring !hobbit$");
-```
-
-Results, scores and `includeMatches` are identical to Fuse's on every backend, with the options that apply to fuzzy terms (`threshold`, `ignoreLocation: false` with `location` and `distance`, `minMatchCharLength`, case and diacritics options). As in Fuse, a document is dropped when an inverse term matches in one key and the query does not match in another, and extended search takes precedence over `useTokenSearch`. The `typing` heuristics apply to fuzzy terms, with the usual change in results.
-
-How it is searched:
-
-- When every group has an `=`, `'`, `^` or `$` term, the search starts from the strings that term matches (the one that matches the fewest) and tests the other terms on those strings only. A fuzzy term is then scored on just those strings when there are few (on simd up to a quarter of all strings, on the other tiers any number), and not at all when none is left. Other queries go through every string.
-- Fuzzy terms that go through every string are scanned together in one pass when they are short (simd, up to 16 characters in all); otherwise one scan per term.
-- On the simd tier the exact-style tests, the `'` search, the scoring of a fuzzy term on a short list and the per-string bookkeeping run in a separate wasm module (2.9 KB gzip, loaded with `useExtendedSearch`). The other tiers do the same in js; their `'` search uses the engine's string search. The js code adds about 2.3 KB (gzip) to every entry point.
-
-Search time in ms (threshold 0.3, keys `title` and `author`, `scripts/bench-extended.mjs`):
-
-| query | 10K books: Fuse | simd | wasm | js | 80K books: Fuse | simd |
-|---|---|---|---|---|---|---|
-| `'lord` | 3.3 | 0.09 | 0.34 | 0.34 | 28 | 0.84 |
-| `'lord !rings` | 3.2 | 0.09 | 0.34 | 0.34 | 25 | 0.86 |
-| `^the lord` | 5.7 | 0.19 | 0.38 | 0.38 | 43 | 1.6 |
-| `^the !hobbit$ 'ring` | 2.8 | 0.09 | 0.52 | 0.52 | 22 | 0.79 |
-| `hary poter` | 25 | 0.37 | 2.7 | 4.6 | 208 | 3.7 |
-| `tolkein \| christie` | 73 | 0.44 | 3.2 | 5.7 | 600 | 4.2 |
-
-## Token search
-
-`useTokenSearch: true` searches the words of the query separately, like Fuse 7.5. `"wen co"` becomes two patterns, `wen` and `co`, and a string scores `1 - sum(idf * (1 - score)) / sum(idf)` over the terms that match. A term's idf comes from how many indexed strings contain it, so rare terms count more. A string needs to match only one term, unless `tokenMatch: "all"` requires every term to be matched by some string of the document.
-
-```js
-const ff = await Fuseter.create(books, { keys: ["title"], useTokenSearch: true, tokenMatch: "all", threshold: 0.3 });
-ff.search("lord rings");
-```
-
-Terms are what `tokenize` returns for the normalised text: by default runs of letters, marks, digits and `_`, otherwise the matches of a global RegExp or the array a function returns. Results, scores and `includeMatches` are identical to Fuse's on every backend, and `add`, `remove` and `setCollection` keep the document frequencies current. A `tokenize` RegExp without the global flag is rejected (Fuse warns and uses only its first match).
-
-Each distinct term is scanned like an ordinary query (a repeated term once), and the scores are accumulated in wasm on the wasm and simd tiers. The in-wasm combine step is not used: a search costs the scans plus a js combine, and the simd tier sorts the hits in wasm. The simd tier scans several short terms in one pass when their lengths add up to 16 characters or less (not with `minMatchCharLength` or any `typing` option, nor for terms over 16 characters). On 10K books at threshold 0.3 a token search of 1-7 terms takes 0.3-1.1 ms on simd, 1.6-5.7 ms on wasm and 2.7-10 ms on js, against 0.25-0.5 ms, 1.3-2.2 ms and 2-4 ms for a plain search of the same text. The `typing` heuristics apply to each term; as with any `typing` option, results then differ from Fuse's.
-
-## Match highlighting
-
-`includeMatches: true` adds `matches` to every result, in Fuse's format and with Fuse's indices:
-
-```js
-const books = [{ title: "The Hobbit", tags: ["fantasy", "hobbit"] }];
-const ff = await Fuseter.create(books, { keys: ["title", "tags"], includeMatches: true });
-ff.search("hobit")[0].matches;
-// [{ indices: [[4, 9]], value: "The Hobbit", key: "title" }, { indices: [[0, 5]], value: "hobbit", key: "tags", refIndex: 1 }]
-```
-
-`indices` are inclusive `[start, end]` ranges into `value`. `key` is the key as written (paths joined with `.`) and is absent for collections of strings; `refIndex` is the position in the array when the key's value is an array.
-
-Like Fuse, the ranges mark every exact occurrence of the query, or else every character of the best approximate match that also occurs in the query. They are computed in js for the returned results only, so they cost little with a `limit` and the same on every backend. This also works with the `typing` heuristics, which then decide where the best match is.
-
-`indicesIn: "original"` makes the ranges refer to `value` as it is written. By default (and in Fuse) they refer to the text after lower-casing and, with `ignoreDiacritics`, stripping, which has a different length for `ß` and for decomposed accents (`e` + a combining mark). For other text the two are the same.
-
-### Experimental highlighting
-
-`highlighting: { aligned: true, allOccurrences: true }` (either one, needs `includeMatches`) replaces Fuse's ranges with ones found by aligning the query with the text, using the same costs as the search (also with `typing`). The ranges no longer match Fuse's.
-
-- `aligned`: a range is the text the query was aligned with. For `hary poter` in `Sweet Savage Love Rosemary Rogers` Fuse marks `ary Ro` and `er`, aligned marks `mary Roger`.
-- `allOccurrences`: every place where the query matches within the threshold is marked (`lord` also marks `lard` and `lorrd` at a threshold that allows one error), not only the best one. Without `aligned` each place gets Fuse's character window.
-
-## Typing heuristics (experimental)
-
-A couple of heuristics to better match how people type and make typos.
-
-They change the ranking, so results no longer match Fuse, and the options are not stable yet. Without `typing`, results are identical to Fuse.
-
-```js
-Fuseter.create(models, { keys: ["name"], typing: { firstLetter: true, transposition: true } });
-```
-
-- `firstLetter`: the first letter of each query word counts double. A wrong or missing first letter costs 2 errors. This is based on research suggesting that the first letter is rarely wrong ([Pollock & Zamora, 1983](https://doi.org/10.1002/asi.4630340108); [abbreviation expansion for users with motor disabilities](https://www.researchgate.net/publication/336536172_A_Probabilistic_Flexible_Abbreviation_Expansion_System_for_Users_With_Motor_Disabilities)).
-  - `{ weighted: "first" }` weights only the first letter of the whole query instead of every word.
-  - `{ midWord: 2 }` makes a correct first letter in the middle of a word cost as much as a wrong one (default 1).
-  - Words start after spaces and punctuation, and at camelCase humps (`myValue`). Queries over 32 characters ignore the option.
-- `transposition`: swapping two adjacent letters costs 1 error instead of 2.
-
-Cost on 10K books: `transposition` makes searches 20-25% slower, `firstLetter` roughly 2x slower (simd: 0.3 ms becomes 0.5 ms; see `scripts/bench-typing.mjs`). On the simd tier each option set loads an extra 13-17 KB (gzip) wasm module the first time it is used.
+- [Options and API](docs/options.md): supported options, changing the collection, indexes
+- [Location scoring](docs/location.md): Fuse's default `ignoreLocation: false` behaviour
+- [Extended search](docs/extended-search.md): `^`, `$`, `'`, `!`, `=` and `|` query syntax
+- [Token search](docs/token-search.md): search the words of a query separately
+- [Logical queries](docs/logical-queries.md): `$and` / `$or` queries
+- [Match, parseQuery and plugins](docs/plugins.md): `Fuseter.match`, `Fuseter.parseQuery`, `Fuseter.use`
+- [Match highlighting](docs/highlighting.md): `includeMatches` and experimental highlighting
+- [Typing heuristics](docs/typing.md) (experimental): first-letter weighting and transposition
 
 ## Development
 
 - `npm install`, then `npm test`: runs the equivalence suite (random corpora, all tiers, thresholds 0-1, limits, every supported option, forced fallbacks) against the Fuse 7.5 dev dependency. Takes about a minute.
-- `npm run build:wasm` rebuilds `wasm/*.wasm` and the embedded `src/wasm/*.mjs` from `zig/` (needs zig 0.17; the generated `src/wasm/*.mjs` are committed and CI fails if a rebuild changes them).
+- `npm run build:wasm` rebuilds `wasm/*.wasm` and the embedded `src/wasm/*.mjs` from `zig/` (needs zig 0.17). The generated `src/wasm/*.mjs` are committed, and CI fails if a rebuild changes them.
 - `node scripts/browser-check.mjs [chromium] [firefox] [webkit]` bundles the library with esbuild (code splitting) and runs the Fuse comparison, the typing options and the fallback logic in real browsers, once normally and once under a CSP that blocks wasm. Setup: `npm i --no-save playwright esbuild && npx playwright install chromium firefox`. Last run: Chromium 156 and Firefox 157 pass; Safari is untested.
-- `node scripts/bench.mjs [books.json] [--fuse] [--json=file]` prints a timing table (`--json` saves it, `node scripts/chart.mjs` turns it into the charts in `docs/`); `node scripts/bench-typing.mjs [books.json]` compares the typing heuristics with the standard kernels, and `node scripts/bench-tokens.mjs [books.json]` compares token search with plain search and Fuse's token search, and `node scripts/bench-location.mjs [books.json]` compares `ignoreLocation: false` with `true` (`FUSE=0` skips Fuse in both).
+- Benchmarks (`FUSE=0` skips Fuse in the typing, tokens and location ones):
+  - `node scripts/bench.mjs [books.json] [--fuse] [--json=file]` prints a timing table. `--json` saves it, and `node scripts/chart.mjs` turns it into the charts in `docs/`.
+  - `node scripts/bench-typing.mjs [books.json]` compares the typing heuristics with the standard kernels.
+  - `node scripts/bench-tokens.mjs [books.json]` compares token search with plain search and Fuse's token search.
+  - `node scripts/bench-location.mjs [books.json]` compares `ignoreLocation: false` with `true`.
+  - `node scripts/bench-extended.mjs [books.json]` times extended search queries.
